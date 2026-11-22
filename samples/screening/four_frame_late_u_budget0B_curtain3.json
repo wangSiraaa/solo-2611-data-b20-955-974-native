@@ -1,0 +1,47 @@
+{
+  "feasible": true,
+  "total_loss": 8,
+  "end_tick": 3,
+  "printed_bytes": 0,
+  "printed_frames": [],
+  "reason": "optimal schedule (loss, then earliest curtain, then fewest print bytes)",
+  "beats": [
+    {
+      "tick": 0,
+      "action": "orig",
+      "list_index": 0,
+      "frame": 2,
+      "loss": 0,
+      "wall_before": "LOGO",
+      "base_before": null,
+      "wall_after": 2,
+      "base_after": 2,
+      "note": "full frame needs no base"
+    },
+    {
+      "tick": 1,
+      "action": "replace",
+      "list_index": 1,
+      "frame": 3,
+      "loss": 5,
+      "wall_before": 2,
+      "base_before": 2,
+      "wall_after": 2,
+      "base_after": 2,
+      "note": "repeats frame 2"
+    },
+    {
+      "tick": 2,
+      "action": "replace",
+      "list_index": 2,
+      "frame": 4,
+      "loss": 3,
+      "wall_before": 2,
+      "base_before": 2,
+      "wall_after": 2,
+      "base_after": 2,
+      "note": "repeats frame 2"
+    }
+  ],
+  "evidence_used": {}
+}

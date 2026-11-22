@@ -1,0 +1,59 @@
+{
+  "feasible": true,
+  "total_loss": 0,
+  "end_tick": 4,
+  "printed_bytes": 0,
+  "printed_frames": [],
+  "reason": "optimal schedule (loss, then earliest curtain, then fewest print bytes)",
+  "beats": [
+    {
+      "tick": 0,
+      "action": "orig",
+      "list_index": 0,
+      "frame": 2,
+      "loss": 0,
+      "wall_before": "LOGO",
+      "base_before": null,
+      "wall_after": 2,
+      "base_after": 2,
+      "note": "full frame needs no base"
+    },
+    {
+      "tick": 1,
+      "action": "load",
+      "list_index": null,
+      "frame": 1,
+      "loss": 0,
+      "wall_before": 2,
+      "base_before": 2,
+      "wall_after": 2,
+      "base_after": 1,
+      "note": "confirmed full frame 1 loaded as decoding base"
+    },
+    {
+      "tick": 2,
+      "action": "orig",
+      "list_index": 1,
+      "frame": 3,
+      "loss": 0,
+      "wall_before": 2,
+      "base_before": 1,
+      "wall_after": 3,
+      "base_after": 3,
+      "note": "delta frame decoded with required base 1"
+    },
+    {
+      "tick": 3,
+      "action": "orig",
+      "list_index": 2,
+      "frame": 4,
+      "loss": 0,
+      "wall_before": 3,
+      "base_before": 3,
+      "wall_after": 4,
+      "base_after": 4,
+      "note": "delta frame decoded with required base 3"
+    }
+  ],
+  "evidence_used": {}
+}

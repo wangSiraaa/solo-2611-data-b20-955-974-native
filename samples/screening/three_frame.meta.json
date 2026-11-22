@@ -1,0 +1,222 @@
+{
+  "capture": "three_frame.pcapng",
+  "session": 1,
+  "scope": {
+    "section_id": 0,
+    "interface_id": 0,
+    "src_ip": "198.51.100.10",
+    "dst_ip": "198.51.100.20",
+    "src_port": 4100,
+    "dst_port": 4200
+  },
+  "packets": [
+    {
+      "order": 0,
+      "label": "A full @0",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "0",
+      "ts_raw": 0,
+      "expected_timestamp": "0",
+      "in_scoped_flow": true,
+      "truncated": false,
+      "captured_len": 53,
+      "orig_len": 53,
+      "block_range": [
+        112,
+        204
+      ],
+      "body_range": [
+        140,
+        193
+      ]
+    },
+    {
+      "order": 1,
+      "label": "B prefix @0",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "0",
+      "ts_raw": 0,
+      "expected_timestamp": "0",
+      "in_scoped_flow": true,
+      "truncated": true,
+      "captured_len": 53,
+      "orig_len": 54,
+      "block_range": [
+        204,
+        296
+      ],
+      "body_range": [
+        232,
+        285
+      ]
+    },
+    {
+      "order": 2,
+      "label": "B full retransmit @2",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "2",
+      "ts_raw": 2000000,
+      "expected_timestamp": "2",
+      "in_scoped_flow": true,
+      "truncated": false,
+      "captured_len": 54,
+      "orig_len": 54,
+      "block_range": [
+        296,
+        388
+      ],
+      "body_range": [
+        324,
+        378
+      ]
+    },
+    {
+      "order": 3,
+      "label": "C full @2",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "2",
+      "ts_raw": 2000000,
+      "expected_timestamp": "2",
+      "in_scoped_flow": true,
+      "truncated": false,
+      "captured_len": 53,
+      "orig_len": 53,
+      "block_range": [
+        388,
+        480
+      ],
+      "body_range": [
+        416,
+        469
+      ]
+    },
+    {
+      "order": 4,
+      "label": "reverse echo B (must be ignored)",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.20",
+      "dst_ip": "198.51.100.10",
+      "src_port": 4200,
+      "dst_port": 4100,
+      "tick": "1",
+      "ts_raw": 1000000,
+      "expected_timestamp": "1",
+      "in_scoped_flow": false,
+      "truncated": false,
+      "captured_len": 54,
+      "orig_len": 54,
+      "block_range": [
+        480,
+        572
+      ],
+      "body_range": [
+        508,
+        562
+      ]
+    },
+    {
+      "order": 5,
+      "label": "other-section same iface B (must be ignored)",
+      "section_id": 1,
+      "catalog_section_id": 1,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "1",
+      "ts_raw": 1000000,
+      "expected_timestamp": "1",
+      "in_scoped_flow": false,
+      "truncated": false,
+      "captured_len": 54,
+      "orig_len": 54,
+      "block_range": [
+        860,
+        952
+      ],
+      "body_range": [
+        888,
+        942
+      ]
+    },
+    {
+      "order": 6,
+      "label": "headerless fragment",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "1",
+      "ts_raw": 1000000,
+      "expected_timestamp": "1",
+      "in_scoped_flow": true,
+      "truncated": false,
+      "captured_len": 45,
+      "orig_len": 45,
+      "block_range": [
+        572,
+        656
+      ],
+      "body_range": [
+        600,
+        645
+      ]
+    },
+    {
+      "order": 7,
+      "label": "late conflicting B copy @5",
+      "section_id": 0,
+      "catalog_section_id": 0,
+      "interface_id": 0,
+      "src_ip": "198.51.100.10",
+      "dst_ip": "198.51.100.20",
+      "src_port": 4100,
+      "dst_port": 4200,
+      "tick": "5",
+      "ts_raw": 5000000,
+      "expected_timestamp": "5",
+      "in_scoped_flow": true,
+      "truncated": false,
+      "captured_len": 54,
+      "orig_len": 54,
+      "block_range": [
+        656,
+        748
+      ],
+      "body_range": [
+        684,
+        738
+      ]
+    }
+  ]
+}

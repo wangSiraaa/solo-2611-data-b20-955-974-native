@@ -1,0 +1,58 @@
+{
+  "at": "0",
+  "frames": {
+    "1": {
+      "frame_no": 1,
+      "status": "complete",
+      "kind": "full",
+      "declared_len": 1,
+      "base_no": 65535,
+      "readable_len": 1,
+      "readable_bytes_hex": "01",
+      "reason": "consistent copies cover all 1 declared body byte(s)",
+      "evidence_packet_indices": [
+        1
+      ]
+    },
+    "2": {
+      "frame_no": 2,
+      "status": "complete",
+      "kind": "full",
+      "declared_len": 1,
+      "base_no": 65535,
+      "readable_len": 1,
+      "readable_bytes_hex": "04",
+      "reason": "consistent copies cover all 1 declared body byte(s)",
+      "evidence_packet_indices": [
+        0
+      ]
+    },
+    "3": {
+      "frame_no": 3,
+      "status": "complete",
+      "kind": "delta",
+      "declared_len": 1,
+      "base_no": 1,
+      "readable_len": 1,
+      "readable_bytes_hex": "03",
+      "reason": "consistent copies cover all 1 declared body byte(s)",
+      "evidence_packet_indices": [
+        2
+      ]
+    },
+    "4": {
+      "frame_no": 4,
+      "status": "complete",
+      "kind": "delta",
+      "declared_len": 1,
+      "base_no": 3,
+      "readable_len": 1,
+      "readable_bytes_hex": "04",
+      "reason": "consistent copies cover all 1 declared body byte(s)",
+      "evidence_packet_indices": [
+        3
+      ]
+    }
+  },
+  "headerless_records": []
+}

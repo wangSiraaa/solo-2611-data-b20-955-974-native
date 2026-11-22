@@ -1,0 +1,78 @@
+{
+  "feasible": true,
+  "total_loss": 0,
+  "end_tick": 5,
+  "printed_bytes": 1,
+  "printed_frames": [
+    4
+  ],
+  "reason": "optimal schedule (loss, then earliest curtain, then fewest print bytes)",
+  "beats": [
+    {
+      "tick": 0,
+      "action": "orig",
+      "list_index": 0,
+      "frame": 2,
+      "loss": 0,
+      "wall_before": "LOGO",
+      "base_before": null,
+      "wall_after": 2,
+      "base_after": 2,
+      "note": "full frame needs no base"
+    },
+    {
+      "tick": 1,
+      "action": "print",
+      "list_index": 1,
+      "frame": 4,
+      "loss": 0,
+      "wall_before": 2,
+      "base_before": 2,
+      "wall_after": 4,
+      "base_after": 4,
+      "note": "printed card projected; frame becomes new base"
+    },
+    {
+      "tick": 2,
+      "action": "load",
+      "list_index": null,
+      "frame": 3,
+      "loss": 0,
+      "wall_before": 4,
+      "base_before": 4,
+      "wall_after": 4,
+      "base_after": 3,
+      "note": "confirmed full frame 3 loaded as decoding base"
+    },
+    {
+      "tick": 3,
+      "action": "orig",
+      "list_index": 2,
+      "frame": 5,
+      "loss": 0,
+      "wall_before": 4,
+      "base_before": 3,
+      "wall_after": 5,
+      "base_after": 5,
+      "note": "delta frame decoded with required base 3"
+    },
+    {
+      "tick": 4,
+      "action": "orig",
+      "list_index": 3,
+      "frame": 3,
+      "loss": 0,
+      "wall_before": 5,
+      "base_before": 5,
+      "wall_after": 3,
+      "base_after": 3,
+      "note": "full frame needs no base"
+    }
+  ],
+  "evidence_used": {
+    "4": [
+      0,
+      3
+    ]
+  }
+}
