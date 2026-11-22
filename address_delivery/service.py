@@ -22,11 +22,14 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .buildings import BuildingRecognition, BuildingRegistry
 from .catalog import Catalog
 from .db import connect
 from .delivery import AttemptResult, BatchResult, DeliveryStore
 from .input import parse_address_input_document, read_csv_addresses
+from .keys import KeyLedger
 from .models import AddressInput, validate_address_input
+from .night import NightDesk, NightPlanner, scenario_from_cutoff
 
 
 # Where to find a parcel's original address when retrying.
@@ -42,6 +45,11 @@ class AddressService:
         self.conn = connect(self.db_path)
         self.catalog = Catalog(self.conn)
         self.delivery = DeliveryStore(self.conn)
+        # Additive night-shift stores; the existing counter surface is
+        # untouched and each store still owns only its own tables.
+        self.buildings = BuildingRegistry(self.conn)
+        self.keys = KeyLedger(self.conn)
+        self.desk = NightDesk(self.keys)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -288,6 +296,65 @@ class AddressService:
 
     def coverage_hits(self, street_id: str, house_no: int) -> list[dict[str, Any]]:
         return [h.as_dict() for h in self.catalog.coverage_hits(street_id, house_no)]
+
+    # -- building recognition ------------------------------------------------
+
+    def register_building(self, definition: dict[str, Any]):
+        """Register one building segment from a plain dict."""
+        return self.buildings.register_building(
+            definition["building_id"],
+            definition["street_id"],
+            int(definition["lo"]),
+            int(definition["hi"]),
+            parity=definition.get("parity", "any"),
+            station_id=definition.get("station_id"),
+            name=definition.get("name"),
+        )
+
+    def recognize_building(self, parcel_id: str) -> dict[str, Any]:
+        """Recognise a parcel's building from its frozen, successful job."""
+        return self.buildings.recognize_parcel(self.delivery, parcel_id).as_dict()
+
+    def recognize_buildings(self, parcel_ids: Iterable[str]) -> list[dict[str, Any]]:
+        return [
+            r.as_dict()
+            for r in self.buildings.recognize_parcels(self.delivery, list(parcel_ids))
+        ]
+
+    # -- night planning -------------------------------------------------------
+
+    def night_scenario(
+        self,
+        snapshot_id: str,
+        *,
+        graph,
+        station: str,
+        entrances,
+        parcels,
+        closing_minute: int,
+        counter_nodes: dict[str, str],
+        counter_holders: dict[str, str] | None = None,
+    ):
+        """Build a :class:`~address_delivery.night.NightScenario` from the
+        cutoff sheet frozen on this service's key ledger."""
+        return scenario_from_cutoff(
+            self.keys,
+            snapshot_id,
+            graph=graph,
+            station=station,
+            entrances=entrances,
+            parcels=parcels,
+            closing_minute=closing_minute,
+            counter_nodes=counter_nodes,
+            counter_holders=counter_holders,
+        )
+
+    @staticmethod
+    def plan_night(scenario) -> NightPlanner:
+        return NightPlanner(scenario)
+
+    def sign_plan(self, plan) -> dict[str, Any]:
+        return self.desk.sign(plan)
 
 
 def _source_item_from_job(job: dict[str, Any]) -> AddressInput:

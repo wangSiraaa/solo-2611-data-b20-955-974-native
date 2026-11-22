@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .catalog import Catalog
 from .db import connect
-from .errors import CatalogError, InputFormatError
+from .errors import CatalogError, InputFormatError, KeyLedgerError
 from .service import AddressService
 
 
@@ -193,6 +193,65 @@ def cmd_catalog(args) -> int:
     return 0
 
 
+def cmd_recognize_building(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.recognize_building(args.parcel_id))
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_key_ownership(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.keys.ownership_at(args.key_code, args.moment).as_dict())
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_key_transfer(args) -> int:
+    service = _open_service(args.db)
+    try:
+        if args.kind == "handover":
+            result = service.keys.record_handover(
+                args.transfer_id, args.key_code, args.from_party, args.to_party, args.moment
+            )
+        else:
+            result = service.keys.record_receipt(
+                args.transfer_id, args.key_code, args.from_party, args.to_party, args.moment
+            )
+        _dump(result)
+    except KeyLedgerError as exc:
+        _dump({"error": "key_ledger", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_freeze_cutoff(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.keys.freeze_cutoff(args.snapshot_id, args.moment))
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_cutoff(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.keys.get_cutoff(args.snapshot_id))
+    except KeyLedgerError as exc:
+        _dump({"error": "key_ledger", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="address_delivery")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -263,6 +322,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--district")
     p.add_argument("--street")
     p.set_defaults(func=cmd_catalog)
+
+    p = sub.add_parser("recognize-building", help="recognise a frozen job's building")
+    p.add_argument("--db", required=True)
+    p.add_argument("parcel_id")
+    p.set_defaults(func=cmd_recognize_building)
+
+    p = sub.add_parser("key-ownership", help="physical custody of one key at a moment")
+    p.add_argument("--db", required=True)
+    p.add_argument("key_code")
+    p.add_argument("moment", type=int)
+    p.set_defaults(func=cmd_key_ownership)
+
+    p = sub.add_parser("key-transfer", help="record a handover or receipt signature")
+    p.add_argument("--db", required=True)
+    p.add_argument("kind", choices=["handover", "receipt"])
+    p.add_argument("transfer_id")
+    p.add_argument("key_code")
+    p.add_argument("from_party")
+    p.add_argument("to_party")
+    p.add_argument("moment", type=int)
+    p.set_defaults(func=cmd_key_transfer)
+
+    p = sub.add_parser("freeze-cutoff", help="freeze the per-key inventory at a moment")
+    p.add_argument("--db", required=True)
+    p.add_argument("snapshot_id")
+    p.add_argument("moment", type=int)
+    p.set_defaults(func=cmd_freeze_cutoff)
+
+    p = sub.add_parser("cutoff", help="show a frozen cutoff inventory")
+    p.add_argument("--db", required=True)
+    p.add_argument("snapshot_id")
+    p.set_defaults(func=cmd_cutoff)
 
     return parser
 

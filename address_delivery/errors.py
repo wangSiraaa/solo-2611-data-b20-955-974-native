@@ -18,3 +18,15 @@ class CatalogError(RuntimeError):
 
 class DeliveryError(RuntimeError):
     """An internal delivery-store invariant was violated."""
+
+
+class BuildingError(ValueError):
+    """A building registry definition is malformed or duplicated."""
+
+
+class KeyLedgerError(RuntimeError):
+    """A key-transfer operation breaks the handover state machine."""
+
+
+class PlanningError(ValueError):
+    """A night scenario (graph, entrances, parcels, counters) is malformed."""
