@@ -31,3 +31,35 @@ class NotFoundError(BudgetError):
 
 class VerifyError(BudgetError):
     """独立验证发现产物与目录事实不符。"""
+
+
+class AllocationValidationError(BudgetError):
+    """代拨场次/委托/拨款单负载结构或数值非法。"""
+
+    def __init__(self, message, errors=None):
+        super().__init__(message)
+        self.errors = errors or []
+
+
+class LedgerNotSettledError(BudgetError):
+    """去向册存在不能结清的受困来源，不得进入点名/批签。"""
+
+    def __init__(self, message, errors=None):
+        super().__init__(message)
+        self.errors = errors or []
+
+
+class OrderRejectedError(BudgetError):
+    """正式拨款单被拒：同号异文、突破证额/底线/余额或对已支余额重复下账。"""
+
+    def __init__(self, message, errors=None):
+        super().__init__(message)
+        self.errors = errors or []
+
+
+class AllocationInfeasibleError(BudgetError):
+    """获批项目无法同时足额兑现（原资助证额、留款底线或自有款不足）。"""
+
+    def __init__(self, message, errors=None):
+        super().__init__(message)
+        self.errors = errors or []

@@ -11,9 +11,11 @@
 ```bash
 ./run_tests.sh
 # 或分步
-python3 -m tests.test_service   # 48 项断言：手算小例 + 六类规定场景 + 重开
-python3 -m tests.test_scale     # 20 模型 / 300 格 / 1000 引用规模与计时
-python3 -m tests.demo_cli       # CLI 子进程端到端
+python3 -m tests.test_service        # 51 项断言：手算小例 + 六类规定场景 + 重开
+python3 -m tests.test_allocation     # 69 项断言：代拨去向册/点名册/拨款单全链
+python3 -m tests.test_scale          # 20 模型 / 300 格 / 1000 引用规模与计时
+python3 -m tests.demo_cli            # 原预算 CLI 子进程端到端
+python3 -m tests.demo_allocation_cli # 代拨用途变更 CLI 端到端
 ```
 
 ## 架构与数据流
@@ -158,3 +160,88 @@ python3 -m budget_solver.cli --data-root ./data verify-solve solve1
 ```
 
 所有 JSON 经临时文件 + `os.replace` 原子写入。
+
+## 代拨去向册与用途变更（budget_solver/allocation）
+
+在既有模型/快照/编译/解算设施之上实现“循环代拨的资助改用途”，旧预算公式与
+已发报告原样保留、继续可读；代拨模型以 `ALO_` 为 model_id 前缀与业务模型同根共存。
+
+### 三层产物与数据流
+
+```
+场次 JSON（账户/出资户/注入/按来源转拨比例/议程/签字/委托/委托证/自有款）
+   │ register-session（严格校验：比例和≤1、注入合计为正、规模上限、委托链无环）
+   ▼
+去向册 Ledger（ledgerN）
+   逐出资户模型 + 合计模型，全部走 put-model → snapshot → compile → solve：
+     in_<funder>_<acc> 真实输入格；T_<funder>_<acc> 来源总流入格；
+     r_<funder>_<acc> 来源留用格（留用比例 = 1−Σ来源转出比例）
+   逐户解算给出每个出资户最终留在每个受款户的精确金额与可回查来源；
+   封闭空转 SCC（不外拨且不留用）+ 来源可达性 → 受困来源判定；
+   全部来源结清才放行点名。
+   ▼
+点名册 Rollcall（rollN）
+   按固定议程逐案：本人签字代表本人实际留此户份额；无签字沿唯一委托链找签字人；
+   委托证按原出资户登记、各案共用证额、限定可签案；途中无证/超范围/未遇签字全弃权，
+   有签字只交 min(权益, 证剩额)；途经证按实签同意/反对逐张扣（否决也扣）；
+   以全部留用额为分母核门槛，零留用案不划拨。
+   ▼
+拨款账簿 Book（bookN）+ 正式拨款单 Order（orderN）
+   原资助只可在点名同意金额内转用且不破旧用途底线；自有款按范围贴入、多案共用余额；
+   稳定单号：同号同内容幂等复读、同号异文退回；dry-run 测算不占款；
+   实付后可分开查每个原出资户旧用途余额、转入新用途金额、各自有款余数。
+```
+
+### 关键设计决策
+
+* **转拨合同按来源履约。** 同一转出户对不同出资户的钱可约定不同比例
+  （`transfers[].ratios` 覆盖缺省 `ratio`）。题面 D1 的钱按 1/2 转 Y、D2 的钱
+  全留 X，正是两条来源流；若错误地用账户统一比例，D2 的钱会被误转。
+* **绕环多圈只留用一次。** 留用是线性方程 `r = keep·T`，资金在环上每经过一站
+  只扣一次留用；手算两站各留 1/2 的 8 元注入，解为 A=16/3、B=8/3，合计恰为 8。
+* **受困与空转分离。** “不外拨且不留用”的封闭 SCC 由编译器 SCC 圈定；只有当
+  某来源的钱真实可达该组时，逐户系统出现 `0=非零` 矛盾，该来源不能结清；
+  无来款的空转组只产生零参数解，不牵连其他来源。验证器独立重建 SCC 与矛盾证书。
+* **同意票不等于可划走反对者的钱。** 转用上限是该出资户对此案的实签同意金额；
+  委托证额不足时只签 `min(权益, 证剩)`、其余弃权，并逐案扣证。
+* **可行性用精确分数最大流。** 先用足获签原款（受底线约束），再把自有款运输
+  问题建成 源→自有款（真实余额）→案（可贴范围）→汇（需求缺口），
+  Edmonds-Karp 容量全为 Fraction，给出可执行分款或指出缺口批次。
+
+### 手算案例（tests/test_allocation.py，69 项断言）
+
+| 场景 | 手算结论 |
+| --- | --- |
+| 基准场 D1 出4 / D2 出2 | D1 留 X2Y2、D2 留 X2；CX 同意 3/4、CY 2/2 均获批 |
+| 委托证额 1 | D2 权益 2 只签 1、弃权 1；证两案共用，CX 扣尽后 CY 无额 |
+| 两种合法拨法 | A：转原款3留旧款1、自有款不动；B：转D1的2+贴自有款1、留旧款2；次日再付2结论相反 |
+| 稳定单号 | 同号同内容幂等不二次下账；同号异文退回；dry-run 不占单号不动余额 |
+| D1 留 X 比例 1/2→1/4 | X 仅获 2/3 < 3/4 否决 |
+| 委托证额改 0 | D2 全弃权，X 仅 2/4=1/2 否决 |
+| X 新项目 need=5 | 投票照过，但原款最多转 3 + 自有款 1 = 4，缺口 1 不可同时兑现 |
+| 封闭循环 A↔B 全额互转 | D1 受困 A/B 不能结清、阻断点名；D2 留 C 不受牵连 |
+| 无来款空转组 | A/B 零留用显式登记，D1 全额留 C，本场照常结清 |
+
+### CLI 用法（与原 budget CLI 并列，互不影响）
+
+```bash
+python3 -m budget_solver.allocation.cli --data-root ./data register-session session.json
+python3 -m budget_solver.allocation.cli --data-root ./data build-ledger S1
+python3 -m budget_solver.allocation.cli --data-root ./data verify-ledger ledger1
+python3 -m budget_solver.allocation.cli --data-root ./data build-rollcall ledger1
+python3 -m budget_solver.allocation.cli --data-root ./data open-book ledger1 roll1 --label A
+python3 -m budget_solver.allocation.cli --data-root ./data check-feasible book1
+python3 -m budget_solver.allocation.cli --data-root ./data issue-order book1 order.json
+python3 -m budget_solver.allocation.cli --data-root ./data book-state book1   # 重开核余额
+```
+
+### 持久化布局（挂在数据根的 allocation/ 下）
+
+```
+<root>/allocation/
+  sessions/<session_id>.json   # 规范化场次（不可变）
+  ledgers/ledgerN.json         # 去向册（绑定快照/产物/报告哈希、逐户留用、受困判定）
+  rollcalls/rollN.json         # 点名册（逐案票额、委托链审计、证额扣减）
+  books/bookN.json             # 拨款账簿（开场账 + 已支单号，随单追加）
+  books-orders/orderN.json     # 正式拨款单（不可变，绑定三册指纹与分款明细）
+```

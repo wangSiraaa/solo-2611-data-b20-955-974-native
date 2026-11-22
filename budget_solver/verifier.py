@@ -251,7 +251,14 @@ def verify_solve(catalog, artifact, report):
 
         if output["status"] == "inconsistent":
             record(f"{target} 独立复算无解", result is None)
-            check_certificates(catalog, equations, output, certs, record, target)
+            # 独立分块求解在无解时返回 (None, certs)；证书核对只需要证书本身，
+            # 上游代入用闭包内的输入格（input）事实值补全
+            fixed_inputs = {
+                v: Fraction(equations[v][1])
+                for v in closure if variables[v]["kind"] == "input"
+            }
+            check_certificates(catalog, equations, output, certs, record, target,
+                               fixed_inputs)
             continue
 
         classified, free_params = result
@@ -303,9 +310,13 @@ def verify_solve(catalog, artifact, report):
     return {"ok": True, "checks": checks, "check_count": len(checks)}
 
 
-def check_certificates(catalog, equations, output, certs, record, target):
+def check_certificates(catalog, equations, output, certs, record, target,
+                       fixed_values=None):
     report_certs = output["contradictions"]
     record(f"{target} 矛盾证书数量一致", len(report_certs) == len(certs))
+    # 独立复算得到的上游确定格值：分块消元时它们已被代入块右端，核证书时必须
+    # 同样折成常数，否则会把上游输入格的系数误当成残留的变量项。
+    fixed_values = fixed_values or {}
     for index, cert in enumerate(report_certs):
         # 按报告证书的 λ 直接重算原方程组合（不信任解算器的溯源结果）
         lhs_combo = {}
@@ -315,11 +326,20 @@ def check_certificates(catalog, equations, output, certs, record, target):
             lam = Fraction(item["lambda"])
             coeffs, rhs = equations[ev]
             for var, coef in coeffs.items():
-                lhs_combo[var] = lhs_combo.get(var, Fraction(0)) + lam * coef
+                weight = lam * coef
+                if var in fixed_values:
+                    # 上游确定格代入：coeffs·x = rhs，代入 x=v 后该项移到右端
+                    # 即 rhs' = rhs - coef·v（再乘 λ）
+                    rhs_combo -= weight * fixed_values[var]
+                else:
+                    lhs_combo[var] = lhs_combo.get(var, Fraction(0)) + weight
             rhs_combo += lam * rhs
+        # 矛盾证书的本质：块内自由/循环变量端全部消去（恒零）、常数端非零。
+        nonzero_terms = {var: coef for var, coef in lhs_combo.items() if coef != 0}
         record(
-            f"{target} 证书{index} 组合后左端恒为 0",
-            all(v == 0 for v in lhs_combo.values()),
+            f"{target} 证书{index} 组合后变量端恒为 0（上游已代入）",
+            not nonzero_terms,
+            f"nonzero={ {v: str(c) for v, c in nonzero_terms.items()} }",
         )
         record(
             f"{target} 证书{index} 常数右端非零且与证书一致",
