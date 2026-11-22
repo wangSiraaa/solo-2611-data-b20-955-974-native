@@ -27,6 +27,7 @@ from .db import connect
 from .delivery import AttemptResult, BatchResult, DeliveryStore
 from .input import parse_address_input_document, read_csv_addresses
 from .models import AddressInput, validate_address_input
+from .renumbering import Door, DoorTrace, IssuedDoor, RenumberingStore
 
 
 # Where to find a parcel's original address when retrying.
@@ -42,6 +43,9 @@ class AddressService:
         self.conn = connect(self.db_path)
         self.catalog = Catalog(self.conn)
         self.delivery = DeliveryStore(self.conn)
+        # The renumbering ledger shares the connection but owns separate
+        # tables; it uses the catalog to validate street ids against eras.
+        self.renumbering = RenumberingStore(self.conn, catalog=self.catalog)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -272,6 +276,64 @@ class AddressService:
             "attempts": attempts,
             "final_destination": self.delivery.final_destination(parcel_id),
         }
+
+    # -- renumbering history ------------------------------------------------
+
+    def register_initial_era(self, doors: Iterable, *, label: str = "era-0") -> None:
+        """Register era 0's finite door list (street id + positive number)."""
+        self.renumbering.register_initial_era(doors, label=label)
+
+    def publish_renumbering(self, strips: Sequence, *, label: str | None = None) -> int:
+        """Apply one grouped renumbering publication; returns the new era seq."""
+        return self.renumbering.publish(strips, label=label)
+
+    def registered_doors(self, era_seq: int | None = None):
+        return self.renumbering.registered_doors(era_seq)
+
+    def trace_door(self, street_id: str, house_no: int) -> DoorTrace:
+        return self.renumbering.trace_door(street_id, house_no)
+
+    def trace_parcel(self, parcel_id: str) -> DoorTrace:
+        """Trace a committed parcel from its *frozen* street id and number."""
+        job = self.delivery.get_job(parcel_id)
+        if job is None:
+            from .errors import RenumberingError
+
+            raise RenumberingError(
+                f"parcel {parcel_id} has no committed delivery",
+                code="parcel_not_committed",
+                conflicts=[{"parcel_id": parcel_id}],
+            )
+        return self.renumbering.trace_door(job["street_id"], job["house_no"])
+
+    def issue_final_door(self, parcel_id: str) -> IssuedDoor:
+        """Bind the ledger's final door to a real, already committed parcel.
+
+        The frozen job - the result of ``submit_new`` / a replayed
+        ``replay_submitted`` - is the only starting point accepted.
+        """
+        return self.renumbering.issue_parcel(
+            parcel_id,
+            verify=lambda pid: self._frozen_door(pid),
+        )
+
+    def issue_door(self, parcel_id: str, street_id: str, house_no: int) -> IssuedDoor:
+        return self.renumbering.issue_door(parcel_id, street_id, house_no)
+
+    def issued_door(self, parcel_id: str):
+        return self.renumbering.issued_door(parcel_id)
+
+    def verify_pickup_claim(self, parcel_id: str, street_id: str, house_no: int) -> dict[str, Any]:
+        return self.renumbering.verify_claim(parcel_id, street_id, house_no)
+
+    def renumbering_snapshot(self) -> dict[str, Any]:
+        return self.renumbering.snapshot()
+
+    def _frozen_door(self, parcel_id: str) -> dict[str, Any] | None:
+        job = self.delivery.get_job(parcel_id)
+        if job is None:
+            return None
+        return {"street_id": job["street_id"], "house_no": job["house_no"]}
 
     # -- passthrough catalog queries ----------------------------------------
 

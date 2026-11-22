@@ -29,7 +29,8 @@ from pathlib import Path
 
 from .catalog import Catalog
 from .db import connect
-from .errors import CatalogError, InputFormatError
+from .errors import CatalogError, InputFormatError, RenumberingError
+from .renumbering import Door
 from .service import AddressService
 
 
@@ -193,6 +194,87 @@ def cmd_catalog(args) -> int:
     return 0
 
 
+def cmd_renumber_init(args) -> int:
+    service = _open_service(args.db)
+    try:
+        doc = _load_json_arg(args.doors)
+        doors = [Door(str(d["street_id"]), int(d["house_no"])) for d in doc["doors"]]
+        service.register_initial_era(doors, label=args.label)
+        _dump({"registered_era": 0,
+               "doors": [d.as_dict() for d in service.registered_doors(0)]})
+    except RenumberingError as exc:
+        _dump({"error": exc.code, "message": str(exc), "conflicts": exc.conflicts})
+        return 5
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_renumber_publish(args) -> int:
+    service = _open_service(args.db)
+    try:
+        doc = _load_json_arg(args.publication)
+        era = service.publish_renumbering(doc["strips"], label=doc.get("label"))
+        _dump({"new_era": era,
+               "doors": [d.as_dict() for d in service.registered_doors(era)]})
+    except RenumberingError as exc:
+        _dump({"error": exc.code, "message": str(exc), "conflicts": exc.conflicts})
+        return 5
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_renumber_trace(args) -> int:
+    service = _open_service(args.db)
+    try:
+        if args.parcel:
+            trace = service.trace_parcel(args.parcel)
+        else:
+            trace = service.trace_door(args.street_id, args.house_no)
+        _dump(trace.as_dict())
+    except RenumberingError as exc:
+        _dump({"error": exc.code, "message": str(exc), "conflicts": exc.conflicts})
+        return 5
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_renumber_issue(args) -> int:
+    service = _open_service(args.db)
+    try:
+        if args.parcel and not args.street_id:
+            issued = service.issue_final_door(args.parcel)
+        else:
+            issued = service.issue_door(args.parcel, args.street_id, args.house_no)
+        _dump(issued.as_dict())
+    except RenumberingError as exc:
+        _dump({"error": exc.code, "message": str(exc), "conflicts": exc.conflicts})
+        return 5
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_renumber_verify(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.verify_pickup_claim(args.parcel, args.street_id, args.house_no))
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_renumber_snapshot(args) -> int:
+    service = _open_service(args.db)
+    try:
+        _dump(service.renumbering_snapshot())
+    finally:
+        service.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="address_delivery")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -263,6 +345,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--district")
     p.add_argument("--street")
     p.set_defaults(func=cmd_catalog)
+
+    p = sub.add_parser("renumber-init", help="register era 0's finite door list")
+    p.add_argument("--db", required=True)
+    p.add_argument("--label", default="era-0")
+    p.add_argument("doors", help="JSON doc {doors:[{street_id,house_no}]} (- for stdin)")
+    p.set_defaults(func=cmd_renumber_init)
+
+    p = sub.add_parser("renumber-publish", help="apply one grouped renumbering publication")
+    p.add_argument("--db", required=True)
+    p.add_argument("publication", help="JSON doc {strips:[...]} (- for stdin)")
+    p.set_defaults(func=cmd_renumber_publish)
+
+    p = sub.add_parser("renumber-trace", help="trace a frozen door or committed parcel per era")
+    p.add_argument("--db", required=True)
+    p.add_argument("--parcel", help="trace from this parcel's frozen job instead")
+    p.add_argument("street_id", nargs="?")
+    p.add_argument("house_no", type=int, nargs="?")
+    p.set_defaults(func=cmd_renumber_trace)
+
+    p = sub.add_parser("renumber-issue", help="bind a parcel-bound final door")
+    p.add_argument("--db", required=True)
+    p.add_argument("parcel")
+    p.add_argument("street_id", nargs="?")
+    p.add_argument("house_no", type=int, nargs="?")
+    p.set_defaults(func=cmd_renumber_issue)
+
+    p = sub.add_parser("renumber-verify", help="check a pickup slip against the issued door")
+    p.add_argument("--db", required=True)
+    p.add_argument("parcel")
+    p.add_argument("street_id")
+    p.add_argument("house_no", type=int)
+    p.set_defaults(func=cmd_renumber_verify)
+
+    p = sub.add_parser("renumber-snapshot", help="dump eras, doors, strips and issued doors")
+    p.add_argument("--db", required=True)
+    p.set_defaults(func=cmd_renumber_snapshot)
 
     return parser
 

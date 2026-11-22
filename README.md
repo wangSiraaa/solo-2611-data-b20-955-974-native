@@ -2,7 +2,6 @@
 
 Python 3.11 + SQLite（标准库 `sqlite3`），只处理合成地址。实现位于
 `address_delivery/`，测试位于 `tests/`，不修改 `materials/707`。
-
 ## 快速开始
 
 ```bash
@@ -28,7 +27,7 @@ python3 -m address_delivery job --db /tmp/a.db P2
 python3 -m address_delivery catalog --db /tmp/a.db street --id S2
 ```
 
-测试：`python3 -m unittest discover -s tests`（78 项，覆盖下述全部场景）。
+测试：`python3 -m unittest discover -s tests`（127 项，覆盖下述全部场景）。
 
 ## 结构
 
@@ -37,6 +36,9 @@ python3 -m address_delivery catalog --db /tmp/a.db street --id S2
 | `normalization.py` | 仅 NFC + 首尾去空白；身份键构造 |
 | `catalog.py` | 城市/区/街道稳定 ID、作用域名称表、完整父链解析、覆盖片 |
 | `delivery.py` | 独立投递作业库：尝试、原子提交、身份冻结、历史 |
+| `renumbering.py` | 三代门簿、成组换号条发布/冲突拒绝、逐代追踪、包裹绑定签发与核名 |
+| `cabinet.py` | 退件柜有向通道、唯一目标格、BFS 最少搬运与无解原因、柜面查询 |
+| `counter.py` | 分段柜员操作、信三态、步封/环封、插单待交与取走后重排 |
 | `service.py` | 共享一个连接的组合入口（目录只读 + 作业写入同一事务） |
 | `input.py` | CSV 与 `address-input/v1` 的结构校验 |
 | `cli.py` | 命令行 |
@@ -111,3 +113,70 @@ python3 -m address_delivery catalog --db /tmp/a.db street --id S2
 | P7 | — | 西/东路 = 停用 S2 → 拒绝新派送 |
 
 最终已提交：P2/P5/P6（版本 1）+ P3/P4（版本 2）；P1、P7 无作业。
+
+## 门牌沿革与退件移柜
+
+只处理合成街区。三个新模块在同一套 dataclass + SQLite/结构化结果风格上工作，
+规模上限固定为 **8 格、6 封信、三代门簿**。
+
+### `renumbering.py` — 门牌沿革（SQLite，独立表）
+
+- 门以**稳定街道 ID + 正号门牌**为键；两个时代同名同号可以是不同实体，
+  投递成功后冻结的街道 ID 不会因今天的别名更正被重新猜测。
+- `register_initial_era` 登记第 0 代有限门清单；`publish_renumbering` 接收
+  一组换号条：旧稳定街道 + 闭区间 + 单双/全部编号，新稳定街道 + 首号与
+  **非零步长**的等差序列；匹配旧号升序、与新号按序列位置一一对应。
+- 无条覆盖的门原样沿用。同代两条覆盖同一旧门（`overlapping_old_coverage`）、
+  不同在册旧门落到同一新门（`duplicate_new_door`，含与沿用门碰撞）、
+  目标号非正（`target_not_positive`）、街道不在目录（`unknown_street`）
+  都会整次发布拒绝并回滚，冲突门在 `conflicts` 中可复查。
+- 同代换号共用同一张旧图；上代新号只给下代，发布内不二次套算。
+- `trace_door` / `trace_parcel` 从冻结街道 ID 与门号逐代给出实际门号及
+  用到的条（`applied_strip`，沿用为 `carried_over`）。
+- `issue_final_door` 只接受真实已提交包裹（`submit_new` 或
+  `replay_submitted` 的冻结结果），把最终门号与包裹绑定；取件条只能用
+  `verify_pickup_claim` 凭绑定结果核验，旧门号、同名街猜测一律拒绝。
+
+### `cabinet.py` — 退件柜与最少搬运（纯内存，可快照恢复）
+
+- `ReturnCabinet(cells, directed_channels, placement, targets)`：每封信一个
+  目标格且单内目标格互异；一步只许一封信沿一条有向通道进入当时空格，
+  堆叠/对调/边挪边改号在 API 层面不可表达。
+- `plan_min_moves` 在摆放状态上做 BFS，返回可证明最少的 `Move` 序列，
+  每步带搬运前后的空格记录；无解时返回结构化原因：
+  `no_empty_cell`（无空格，首步即不合法）或 `unreachable`（有向通道不可达，
+  含静态受阻信件或 BFS 穷尽的已探索状态数）。
+- 旧柜面查询保留：`face()` 给出每格占信、目标归属与空格。
+
+### `counter.py` — 分段柜员操作与围封
+
+- 信的三态：`in_cell` / `in_hand` / `taken`；搬运拆成 `begin_move`
+  （领出具名信、开启最小围封）与 `complete_move`（落入保留空格），
+  手持期间其他窗口照常营业。
+- 围封范围：每步至少暂封在手信及起落格（`step` 策略）；若若干待搬信的
+  目标正是彼此当前占格，`cycle` 策略或显式 `open_cycle_closure` 可一次
+  封住同一环与所需空格。环大小受 `max_pending` 上限约束，超限自动退回
+  逐步行封；不在搬移/环内的信始终可当场交付。
+- 取件条先经沿革核名：围封外有效请求当场交付；命中围封记为待交，解封时
+  从**当时实物格**交付，等待代价（排队期间完成的搬运数）入账，绝不丢单；
+  重复条、已取走、无效门号均拒绝。
+- 信被真正取走后目标格消失，按当前实物重新 BFS 排余下最少步数；已完成
+  步数照实累计，重排事件（`replanned`）记录新旧剩余步数。
+- 全程无多进程/硬件：`snapshot()`/`restore()` 支持柜员小程序分段执行。
+
+叙事自检脚本：`python3 examples/renumber_and_relocate.py`，覆盖三循环
+4 步、沿用 0 步、封死空格首步无解、真实 `submit_new`/`replay_submitted`
+冻结起步、两代交换、投递后同名街别名更正，以及 cap=1 与整环两种围封下的
+插单等待/改排。
+
+### 沿革 CLI
+
+```bash
+python3 -m address_delivery renumber-init --db /tmp/a.db doors.json
+python3 -m address_delivery renumber-publish --db /tmp/a.db publication.json
+python3 -m address_delivery renumber-trace --db /tmp/a.db S1 1
+python3 -m address_delivery renumber-trace --db /tmp/a.db --parcel P2
+python3 -m address_delivery renumber-issue --db /tmp/a.db P2          # 从冻结作业签发
+python3 -m address_delivery renumber-verify --db /tmp/a.db P2 S1 3
+python3 -m address_delivery renumber-snapshot --db /tmp/a.db
+```
