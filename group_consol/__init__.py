@@ -7,6 +7,9 @@
 - ledger：独立实体账簿（只追加、可重开、原子入账、局部校验）
 - consolidation：集团合并服务（切面冻结、错时待核、逐发票抵销）
 - verifier：独立核验（不调用合并服务自己的汇总函数）
+- segs：件号连续段运算（单票可达百万件，从不逐件展开）
+- general_average：虚构展船的海损理算与码头提货（真实核对、交接、
+  互斥裁定草案、共同海损分摊、留箱/冻款/联保函、结算）
 """
 
 from .errors import (
@@ -19,6 +22,7 @@ from .errors import (
 from .ledger import EntityLedger
 from .consolidation import ConsolidationService
 from .verifier import verify_worksheet
+from .general_average import VoyageDesk, ReleaseError
 
 __all__ = [
     "LedgerError",
@@ -29,4 +33,6 @@ __all__ = [
     "EntityLedger",
     "ConsolidationService",
     "verify_worksheet",
+    "VoyageDesk",
+    "ReleaseError",
 ]

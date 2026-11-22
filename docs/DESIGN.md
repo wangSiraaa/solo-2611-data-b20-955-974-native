@@ -20,13 +20,19 @@
 | `scripts/run_case.py` | 随题 `case.json` 的原样复现（含两种结算口径对比） |
 | `tests/test_ledger_and_merge.py` | 单元测试（负利润、有理分数、回滚、不可变性等） |
 | `tests/stress_test.py` | 40 发票 / 每实体 200 凭证 / 20 声明的容量测试 |
+| `group_consol/segs.py` | 件号连续段运算（合并/差集/交集/子集，百万件不逐件展开） |
+| `group_consol/general_average.py` | 虚构展船的海损理算与码头提货（见第 6 节） |
+| `group_consol/ga_seed.py` | 经原入账入口真实提交一张内部发票的双侧镜像 |
+| `scripts/run_ga.py` | 三笔海损/提货场景 + 两户共用一张函的端到端重开 |
 
 运行：
 
 ```bash
 python3.11 -m unittest tests.test_ledger_and_merge -v
+python3.11 -m unittest tests.test_general_average -v
 python3.11 scripts/run_plan.py plans/operations.json
 python3.11 scripts/run_case.py
+python3.11 scripts/run_ga.py
 python3.11 tests/stress_test.py
 ```
 
@@ -114,3 +120,45 @@ r=0 也不能省略，且 0≤r≤q）。待核结论同样落盘并可复读。
   成本低且一致性由 append-only 约束兜底。
 - 错时提交：源端无阻塞地接受单边凭证，冲突全部推迟到发布时一次性输出待核清单；
   重复发布同切面是 O(1) 的持久化复读，不重算；异文切面直接拒绝，不产生第二份底稿。
+
+## 6. 海损理算与码头提货（`general_average.py`，合成口径，不处理真实保险法规）
+
+构建在已入账的 P/S 单体账簿之上；金额一律 `Fraction`，持久化 num/den，绝不取整。
+
+### 6.1 真实核对与航次
+- `register_invoice(heads)`：按两侧 heads 调 `internal_invoices` 取同票镜像，逐字核对
+  `invoice_id/seller/buyer/sku/q/T/C` 与 side 角色；缺侧 `missing_side`、异文
+  `invoice_mismatch` 均为待核，绝不按金额凑平。
+- `create_voyage(voyage_id, ship_value, invoice_ids)`：船方获救船值非负；航次只登记
+  已通过核对的连续件段（单票可百万件，绝不为逐件展开）。
+
+### 6.2 船上交接（按 `(时刻, 同刻序号)` 生效）
+- `add_handover` 一单可同时转多个闭件段；`holdings()` 按 `(time, seq)` 排序后重放，
+  到档顺序无关。
+- 单张交接单内段重叠、超出 `1..q`、或交出人不持有某段全部实件 → **整单退回**（不改变
+  持仓，其余单照常生效）。重叠段在登记时保留原样，解析时才判退，便于审计。
+
+### 6.3 裁定草案与共同海损
+- `register_draft(draft_id, voyage_id, sacrifice, recognize)`：牺牲段只登记连续段，
+  认可子段必须 ⊆ 牺牲段；至多 8 份互斥草案。
+- `compute_ga(draft_id)`：认可件按担险人计入补偿池；每户分摊基数
+  `= 实际获救货值 + 获认可牺牲值`；船方另有获救船值。按基数占比分摊补偿池，
+  `净欠 = 应摊 − 应获偿`；总基数为零且池为空时全零。
+- `liability_register(voyage_id, invoice_id, segments)`：事故当刻险责册，逐段给出
+  担险人、过户来源链、件数与认可价值。
+
+### 6.4 提货、担保与结算
+- `create_claim`：整箱提货单，每箱不得跨货主、不得含任何草案中的已损件；至多 12 箱。
+- `evaluate_release(claim_id, draft_id)`：枚举留箱/放行子集与 (现金, 保函) 组合，求
+  **最高总优先分**；同分列出全部可行方案（含“全冻现金”“全用函”）。每个候选方案都把
+  本航次**尚未结清的全部申请人放在同一份裁定下合并核保**：同函合计抽款不超过可赔付
+  总额，不同草案的模拟抽款绝不相加。
+- `release(...)`：按方案实际放行；完全相同的重复放货**复读原单**，异文重复**拒绝**；
+  跨申请人的同一箱号也拒绝。放行后未提箱只保本人债务。
+- `settle(claim_id, draft_id)`：按实际收到的裁定据实列明净欠、留箱担保金额、现金实扣
+  与应退、余缺向保函索取金额；同一户顺序为**先留箱、再现金、最后函**。同一航次只认
+  一份实际裁定（`ga_rulings`），另一份模拟草案不得动用一分钱。
+
+### 6.5 幂等与可重开
+- 全部状态落 SQLite（`ga_*` 表），`VoyageDesk` 重开即恢复；分数字段 num/den 往返无损。
+- 已出港箱 `released` 不再参与后续补保；每次新放货用当前在港箱与剩余额度重新核够。
