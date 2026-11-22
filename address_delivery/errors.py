@@ -18,3 +18,15 @@ class CatalogError(RuntimeError):
 
 class DeliveryError(RuntimeError):
     """An internal delivery-store invariant was violated."""
+
+
+class ReaderError(RuntimeError):
+    """A synthetic-reader definition, proof or query is malformed."""
+
+
+class ReaderContradiction(ReaderError):
+    """A reader's proofs admit no bijection; its credential is withdrawn."""
+
+
+class LayoutError(ReaderError):
+    """A label layout, page or printing brief is malformed or infeasible."""

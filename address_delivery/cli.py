@@ -30,6 +30,15 @@ from pathlib import Path
 from .catalog import Catalog
 from .db import connect
 from .errors import CatalogError, InputFormatError
+from .labels import (
+    PlanJob,
+    Recipient,
+    StableAddress,
+    diagnose,
+    plan_deck,
+    plan_min_impressions,
+)
+from .readers import Reader, reader_from_json
 from .service import AddressService
 
 
@@ -193,6 +202,129 @@ def cmd_catalog(args) -> int:
     return 0
 
 
+def _reader_arg(value: str) -> Reader:
+    return reader_from_json(_load_json_arg(value))
+
+
+def cmd_reader_calibrate(args) -> int:
+    reader = _reader_arg(args.reader)
+    _dump(reader.credential())
+    return 0
+
+
+def cmd_reader_confusions(args) -> int:
+    reader = _reader_arg(args.reader)
+    _dump(reader.indistinguishable_pairs(args.paper))
+    return 0
+
+
+def _plan_brief_from_document(
+    document: dict, service: AddressService
+) -> tuple[list[PlanJob], list[Recipient], Catalog]:
+    """Build jobs, recipients and the designated edition from a batch brief.
+
+    A brief may either list stable rows explicitly, or point at the committed
+    jobs already in the database via ``"from_committed": true``.  Every
+    ``readers`` entry is a receiving counter bound to this catalog; the
+    ``designated_reader_id`` selects whose registered names may be printed.
+    """
+    from .catalog import Catalog as _Catalog
+    from .db import connect
+    from .labels import Recipient
+
+    readers = {raw["reader_id"]: reader_from_json(raw) for raw in document.get("readers", [])}
+
+    # Each counter has its own frozen catalog.  The brief may give a
+    # ``catalog_db`` per reader; otherwise everyone shares this service's
+    # catalog.
+    recipients: list[Recipient] = []
+    extra_conns = []
+    for raw in document.get("readers", []):
+        reader = readers[raw["reader_id"]]
+        if raw.get("catalog_db"):
+            conn = connect(raw["catalog_db"])
+            extra_conns.append(conn)
+            recipients.append(Recipient(reader, _Catalog(conn)))
+        else:
+            recipients.append(Recipient(reader, service.catalog))
+
+    designated_id = document.get("designated_reader_id")
+    if designated_id:
+        designated = next(r.catalog for r in recipients if r.reader.reader_id == designated_id)
+    else:
+        designated = recipients[0].catalog if recipients else service.catalog
+
+    rows = document.get("rows")
+    if rows is None and document.get("from_committed"):
+        rows = service.delivery.stable_addresses()
+    rows = rows or []
+    jobs = [
+        PlanJob(
+            address=StableAddress(
+                parcel_id=row["parcel_id"],
+                city_id=row["city_id"],
+                district_id=row["district_id"],
+                street_id=row["street_id"],
+                house_no=int(row["house_no"]),
+            ),
+            max_rows=int(row.get("max_rows", document.get("max_rows", 20))),
+            max_cells=int(row.get("max_cells", document.get("max_cells", 40))),
+            separator=row.get("separator", "/"),
+        )
+        for row in rows
+    ]
+    return jobs, recipients, designated
+
+
+def cmd_plan(args) -> int:
+    service = _open_service(args.db)
+    try:
+        document = _load_json_arg(args.brief)
+        jobs, recipients, designated = _plan_brief_from_document(document, service)
+        if args.borrow_for is not None:
+            solution, imps = plan_min_impressions(
+                jobs, designated, recipients, target_cells=args.borrow_for
+            )
+            if solution is None:
+                _dump({"error": "infeasible", "target_cells": args.borrow_for})
+                return 6
+            payload = solution.as_dict(recipients)
+            payload["impressions_needed"] = imps
+            payload["already_owned"] = document.get("owned_impressions", 0)
+            payload["borrowed"] = max(0, imps - int(document.get("owned_impressions", 0)))
+            _dump(payload)
+            return 0
+        solution = plan_deck(
+            jobs, designated, recipients, max_impressions=args.max_impressions
+        )
+        if solution is None:
+            _dump({"error": "infeasible", "max_impressions": args.max_impressions})
+            return 6
+        _dump(solution.as_dict(recipients))
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_diagnose(args) -> int:
+    reader = _reader_arg(args.reader)
+    service = _open_service(args.db)
+    try:
+        _dump(
+            diagnose(
+                reader,
+                service.catalog,
+                args.city_id,
+                args.district,
+                args.street,
+                args.house_no,
+            )
+        )
+    finally:
+        service.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="address_delivery")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -263,6 +395,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--district")
     p.add_argument("--street")
     p.set_defaults(func=cmd_catalog)
+
+    p = sub.add_parser("reader-calibrate", help="issue a reader's reading credential")
+    p.add_argument("--reader", required=True, help="reader JSON (- for stdin)")
+    p.set_defaults(func=cmd_reader_calibrate)
+
+    p = sub.add_parser("reader-confusions", help="readings still indistinguishable")
+    p.add_argument("--reader", required=True, help="reader JSON (- for stdin)")
+    p.add_argument("paper")
+    p.set_defaults(func=cmd_reader_confusions)
+
+    p = sub.add_parser("diagnose", help="decode a raw paper header+street for a reader")
+    p.add_argument("--db", required=True)
+    p.add_argument("--reader", required=True, help="reader JSON (- for stdin)")
+    p.add_argument("city_id")
+    p.add_argument("district")
+    p.add_argument("street")
+    p.add_argument("house_no", type=int)
+    p.set_defaults(func=cmd_diagnose)
+
+    p = sub.add_parser("plan", help="plan pages/layouts for a batch brief")
+    p.add_argument("--db", required=True)
+    p.add_argument("brief", help="batch brief JSON (- for stdin)")
+    p.add_argument("--max-impressions", type=int, default=None)
+    p.add_argument("--borrow-for", type=int, default=None,
+                   help="fewest borrowed impressions for this many paid cells")
+    p.set_defaults(func=cmd_plan)
 
     return parser
 

@@ -203,6 +203,29 @@ class DeliveryStore:
     def list_jobs(self) -> list[dict[str, Any]]:
         return [_job_row(r) for r in self.conn.execute("SELECT * FROM jobs ORDER BY parcel_id")]
 
+    def stable_addresses(self) -> list[dict[str, Any]]:
+        """Stable street/district/house facts for every committed parcel.
+
+        This is the print list's source: only successfully saved jobs
+        contribute, and they contribute the frozen stable IDs and house number,
+        never re-resolved names.  Ordered by house number then parcel id so
+        page planning can honour the existing house-number order.
+        """
+        rows = self.conn.execute(
+            "SELECT parcel_id, city_id, district_id, street_id, house_no "
+            "FROM jobs ORDER BY house_no, parcel_id"
+        ).fetchall()
+        return [
+            {
+                "parcel_id": row["parcel_id"],
+                "city_id": row["city_id"],
+                "district_id": row["district_id"],
+                "street_id": row["street_id"],
+                "house_no": row["house_no"],
+            }
+            for row in rows
+        ]
+
     # -- attempts ------------------------------------------------------------
 
     def attempt(self, item: AddressInput, catalog: Catalog) -> AttemptResult:

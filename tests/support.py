@@ -72,3 +72,37 @@ def synthetic_docs() -> tuple[dict, dict]:
         ],
     }
     return catalog, coverage
+
+
+def planner_docs() -> tuple[dict, dict]:
+    """Worked example: the street 杉 exists east (东/新城) and west (西)."""
+    catalog = {
+        "revision": "p1",
+        "cities": [{"city_id": "C1", "name": "临川市"}],
+        "districts": [
+            {"district_id": "DE", "city_id": "C1", "name": "新城", "aliases": ["东"]},
+            {"district_id": "DW", "city_id": "C1", "name": "西区", "aliases": ["西"]},
+        ],
+        "streets": [
+            {"street_id": "SE", "district_id": "DE", "name": "杉", "aliases": [], "active": True},
+            {"street_id": "SW", "district_id": "DW", "name": "杉", "aliases": [], "active": True},
+        ],
+    }
+    coverage = {
+        "revision": "p1",
+        "coverages": [
+            {"coverage_id": "KE", "street_id": "SE", "station_id": "A", "lo": 1, "hi": 100, "parity": "any"},
+            {"coverage_id": "KW", "street_id": "SW", "station_id": "B", "lo": 1, "hi": 100, "parity": "any"},
+        ],
+    }
+    return catalog, coverage
+
+
+def fresh_planner_catalog():
+    """A standalone Catalog loaded with :func:`planner_docs`."""
+    from address_delivery.catalog import Catalog
+    from address_delivery.db import connect
+
+    catalog = Catalog(connect(":memory:"))
+    catalog.load_initial(*planner_docs())
+    return catalog
