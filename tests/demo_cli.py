@@ -98,6 +98,83 @@ def main():
         assert reopened["report_hash"] == solved["report_hash"]
         print("9. 重开复读：报告", reports, "哈希一致，缓存与报告均持久化")
 
+        # 10. 数量报价曲线：q 点值 0 的循环费率模型 x=2+q/4+x/2 => x=4+q/2
+        quote_payload = {
+            "model_id": "M_QUOTE",
+            "name": "循环费率报价模型",
+            "cells": {
+                "q": {"kind": "input", "value": "0"},
+                "x": {"kind": "formula", "constant": "2", "terms": [
+                    {"coef": "1/4", "cell_id": "q"},
+                    {"coef": "1/2", "cell_id": "x"}]},
+            },
+            "outputs": ["x"],
+        }
+        run_cli(data_root, "put-model", "-", stdin_payload=quote_payload)
+        qsnap = run_cli(data_root, "snapshot", "M_QUOTE", "--label", "quote-v1")
+        qart = run_cli(data_root, "compile", qsnap["snap_id"])
+        curve = run_cli(data_root, "quote-curve", qart["artifact_hash"],
+                        "M_QUOTE::q", "M_QUOTE::x", "--lo", "1", "--hi", "8")
+        assert curve["classification"] == "unique_whole_domain"
+        assert curve["price_relation"] == {
+            "intercept": "4", "q_coef": "1/2", "unique": True, "free_params": []}
+        print("10. 报价曲线：x(q)=4+q/2，整域唯一可报价，分类",
+              curve["classification"])
+
+        single = run_cli(data_root, "quote-at", curve["curve_id"], "3")
+        assert single["unit_price"] == "11/2"
+        assert "M_QUOTE" in single["scope_snapshots"]
+        print("    quote-at q=3 ->", single["unit_price"],
+              "；外部钉选版本随曲线保留")
+
+        spec = {
+            "domain": [1, 8], "budget": "12",
+            "tiers": [{"lo": 1, "hi": 3, "rebate": "0"},
+                      {"lo": 4, "hi": 8, "rebate": "15"}],
+        }
+        spec_path = os.path.join(data_root, "rebate-spec.json")
+        with open(spec_path, "w", encoding="utf-8") as handle:
+            json.dump(spec, handle)
+        budget = run_cli(data_root, "budget-check", curve["curve_id"], spec_path)
+        spans = [(s["lo"], s["hi"]) for s in budget["segments"]]
+        assert spans == [(1, 2), (4, 4)], spans
+        assert budget["segments"][0]["right_neighbor"]["payment"] == "33/2"
+        print("11. 预算核对（1–3 不返 / 4–8 返 15 / 预算 12）：可买", spans,
+              "；第三件 16.5 超预算、第四件净付 9")
+
+        vc = run_cli(data_root, "verify-curve", curve["curve_id"])
+        vb = run_cli(data_root, "verify-budget", budget["budget_id"])
+        assert vc["ok"] and vb["ok"]
+        print("12. 曲线独立验证", vc["check_count"],
+              "项、预算报告独立验证", vb["check_count"], "项全部通过")
+
+        # 部分相容循环例：仅 q=2 相容
+        partial_payload = {
+            "model_id": "M_PART", "name": "部分相容循环",
+            "cells": {
+                "q": {"kind": "input", "value": "0"},
+                "a": {"kind": "formula", "constant": "3",
+                      "terms": [{"coef": "1", "cell_id": "b"}]},
+                "b": {"kind": "formula", "constant": "1", "terms": [
+                    {"coef": "1", "cell_id": "a"},
+                    {"coef": "-2", "cell_id": "q"}]},
+                "c": {"kind": "formula", "constant": "6", "terms": [
+                    {"coef": "1", "cell_id": "a"},
+                    {"coef": "-1", "cell_id": "b"}]},
+            },
+            "outputs": ["c"],
+        }
+        run_cli(data_root, "put-model", "-", stdin_payload=partial_payload)
+        psnap = run_cli(data_root, "snapshot", "M_PART")
+        part = run_cli(data_root, "compile", psnap["snap_id"])
+        pcurve = run_cli(data_root, "quote-curve", part["artifact_hash"],
+                         "M_PART::q", "M_PART::c", "--lo", "1", "--hi", "5")
+        assert pcurve["classification"] == "partial_consistency"
+        assert pcurve["consistent_single_q"] == 2
+        assert pcurve["quotable_segments"] == [
+            {"lo": 2, "hi": 2, "price_at_lo": "9", "price_at_hi": "9"}]
+        print("13. 部分相容循环：仅 q=2 方程相容且单价 9，其余订量列矛盾来源")
+
         print("\nCLI 端到端演示全部通过。数据目录：", data_root)
     finally:
         shutil.rmtree(data_root)

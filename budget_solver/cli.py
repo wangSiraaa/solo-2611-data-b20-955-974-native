@@ -69,6 +69,40 @@ def build_parser():
     p = sub.add_parser("list-reports")
     p = sub.add_parser("get-report")
     p.add_argument("solve_id")
+
+    # ------------------------------------------------ 数量报价曲线 / 采购额度
+    p = sub.add_parser("quote-curve",
+                       help="符号化订量输入格，构造整条数量报价曲线")
+    p.add_argument("artifact", help="编译产物路径或内容哈希")
+    p.add_argument("q_variable", help="订量输入格变量，形如 MODEL::cell")
+    p.add_argument("price_variable", help="单价输出格变量，形如 MODEL::cell")
+    p.add_argument("--lo", type=int, required=True, help="报价域下限（≥1 的整数）")
+    p.add_argument("--hi", type=int, required=True, help="报价域上限（域至多十亿件）")
+    p.add_argument("--label")
+
+    p = sub.add_parser("list-curves", help="列出全部报价曲线（含分类与可报价段）")
+    p = sub.add_parser("get-curve")
+    p.add_argument("curve_id")
+
+    p = sub.add_parser("quote-at", help="单点求某订量的单价（保留外部钉选版本）")
+    p.add_argument("curve_id")
+    p.add_argument("q", type=int)
+
+    p = sub.add_parser("budget-check",
+                       help="消费报价曲线，按回扣价格表与预算核对可买极大连续段")
+    p.add_argument("curve_id")
+    p.add_argument("spec", help="预算规格 JSON 文件，- 表示 stdin")
+    p.add_argument("--label")
+
+    p = sub.add_parser("list-budget-reports")
+    p = sub.add_parser("get-budget-report")
+    p.add_argument("budget_id")
+
+    p = sub.add_parser("verify-curve", help="独立重建方程并核对报价曲线")
+    p.add_argument("curve_id")
+
+    p = sub.add_parser("verify-budget", help="独立核算预算报告的边界与净付")
+    p.add_argument("budget_id")
     return parser
 
 
@@ -162,6 +196,42 @@ def main(argv=None):
             _emit(service.list_reports())
         elif cmd == "get-report":
             _emit(service.get_report(args.solve_id))
+        elif cmd == "quote-curve":
+            artifact = service.load_artifact(args.artifact)
+            curve = service.create_curve(
+                artifact, args.q_variable, args.price_variable,
+                args.lo, args.hi, label=args.label,
+            )
+            _emit(_curve_summary(curve))
+        elif cmd == "list-curves":
+            _emit([_curve_summary(c) for c in service.list_curves()])
+        elif cmd == "get-curve":
+            _emit(service.get_curve(args.curve_id))
+        elif cmd == "quote-at":
+            _emit(service.quote_at(args.curve_id, args.q))
+        elif cmd == "budget-check":
+            spec = json.load(sys.stdin) if args.spec == "-" else json.load(
+                open(args.spec, "r", encoding="utf-8"))
+            report = service.check_budget(args.curve_id, spec, label=args.label)
+            _emit(report)
+        elif cmd == "list-budget-reports":
+            _emit([
+                {
+                    "budget_id": r["budget_id"],
+                    "curve_id": r["curve_id"],
+                    "query_domain": r["query_domain"],
+                    "budget": r["budget"],
+                    "payable_piece_count": r["payable_piece_count"],
+                    "segment_count": len(r["segments"]),
+                }
+                for r in service.list_budget_reports()
+            ])
+        elif cmd == "get-budget-report":
+            _emit(service.get_budget_report(args.budget_id))
+        elif cmd == "verify-curve":
+            _emit(service.verify_curve(args.curve_id))
+        elif cmd == "verify-budget":
+            _emit(service.verify_budget_report(args.budget_id))
         else:  # pragma: no cover
             raise SystemExit(2)
     except BudgetError as exc:
@@ -184,6 +254,28 @@ def _report_summary(report):
         "cache": report["cache"],
         "outputs": report["outputs"],
         "sections": report["sections"],
+    }
+
+
+def _curve_summary(curve):
+    return {
+        "curve_id": curve["curve_id"],
+        "content_hash": curve["content_hash"],
+        "label": curve["label"],
+        "artifact_hash": curve["artifact_hash"],
+        "q_variable": curve["q_variable"],
+        "price_variable": curve["price_variable"],
+        "frozen_q_value": curve["frozen_q_value"],
+        "quote_domain": curve["quote_domain"],
+        "classification": curve["classification"],
+        "price_relation": curve["price_relation"],
+        "required_q_values": curve["required_q_values"],
+        "consistent_single_q": curve["consistent_single_q"],
+        "free_variables": curve["free_variables"],
+        "hard_contradictions": curve["hard_contradictions"],
+        "q_constraints": curve["q_constraints"],
+        "quotable_segments": curve["quotable_segments"],
+        "segments": curve["segments"],
     }
 
 

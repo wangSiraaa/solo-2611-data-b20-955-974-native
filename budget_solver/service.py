@@ -11,6 +11,9 @@ import os
 from .catalog import Catalog
 from .compiler import Compiler
 from .errors import NotFoundError
+from .quoting import QuoteService
+from .quote_verifier import verify_budget_report as _verify_budget_report
+from .quote_verifier import verify_curve as _verify_curve
 from .solver import SolverService
 from .verifier import verify_compile as _verify_compile
 from .verifier import verify_solve as _verify_solve
@@ -23,9 +26,14 @@ class BudgetService:
         self.artifact_dir = os.path.join(self.data_root, "artifacts")
         self.report_dir = os.path.join(self.data_root, "reports")
         self.cache_dir = os.path.join(self.data_root, "cache")
+        self.curve_dir = os.path.join(self.data_root, "curves")
+        self.budget_dir = os.path.join(self.data_root, "budgets")
         self.compiler = Compiler(self.catalog, self.artifact_dir)
         self.solver = SolverService(
             self.catalog, self.artifact_dir, self.report_dir, self.cache_dir
+        )
+        self.quoter = QuoteService(
+            self.catalog, self.artifact_dir, self.curve_dir, self.budget_dir
         )
 
     # ------------------------------------------------------------- 目录面
@@ -97,3 +105,37 @@ class BudgetService:
         report = self.get_report(solve_id)
         artifact = self.load_artifact(report["artifact_hash"])
         return _verify_solve(self.catalog, artifact, report)
+
+    # ------------------------------------------------------------- 报价曲线面
+    def create_curve(self, artifact, q_var, price_var, lo, hi, label=None):
+        return self.quoter.create_curve(
+            artifact, q_var, price_var, lo, hi, label=label
+        )
+
+    def get_curve(self, curve_id):
+        return self.quoter.get_curve(curve_id)
+
+    def list_curves(self):
+        return self.quoter.list_curves()
+
+    def quote_at(self, curve_id, q):
+        return self.quoter.quote_at(curve_id, q)
+
+    def check_budget(self, curve_id, spec, label=None):
+        return self.quoter.check_budget(curve_id, spec, label=label)
+
+    def get_budget_report(self, budget_id):
+        return self.quoter.get_budget_report(budget_id)
+
+    def list_budget_reports(self):
+        return self.quoter.list_budget_reports()
+
+    def verify_curve(self, curve_id):
+        curve = self.get_curve(curve_id)
+        artifact = self.load_artifact(curve["artifact_hash"])
+        return _verify_curve(self.catalog, artifact, curve)
+
+    def verify_budget_report(self, budget_id):
+        report = self.get_budget_report(budget_id)
+        curve = self.get_curve(report["curve_id"])
+        return _verify_budget_report(self.catalog, curve, report)

@@ -6,14 +6,24 @@
 任意代码执行、float 输入。循环引用被当作线性方程组的正常情形处理——可能唯一
 可解、冗余但有自由变量、或互相矛盾。
 
+在固定快照的解算链路之外，系统另提供两条可交付链路，复用同一份编译产物：
+
+* **数量报价曲线**（`quoting.py`）：把一个真实输入格符号化为订量 q，由实际方程
+  推出单价关于 q 的精确仿射关系，目录区分整域唯一 / 部分订量相容 / 同订量多单价
+  / 完全矛盾，负价子段列为不可报价；
+* **采购额度核对**（同模块）：在互不重叠覆盖查询域的整数回扣档上，用精确分数
+  二分求二次净付的整数边界，输出既能唯一报价又能付款的极大连续整数段，报价域
+  可达十亿件、回扣档至多 30 个，全程不枚举订量。
+
 ## 一键复跑
 
 ```bash
 ./run_tests.sh
 # 或分步
 python3 -m tests.test_service   # 48 项断言：手算小例 + 六类规定场景 + 重开
+python3 -m tests.test_quoting   # 70 项断言：报价曲线四分类 + 预算核对 + 十亿件
 python3 -m tests.test_scale     # 20 模型 / 300 格 / 1000 引用规模与计时
-python3 -m tests.demo_cli       # CLI 子进程端到端
+python3 -m tests.demo_cli       # CLI 子进程端到端（含报价/预算/独立验证）
 ```
 
 ## 架构与数据流
@@ -43,9 +53,11 @@ JSON 模型 ──put-model──▶ 目录 Catalog（修订/快照，文件持�
 | `budget_solver/catalog.py` | 模型目录：创建/修订/固定快照；永久 id 与改名分离；整次修订原子拒绝 |
 | `budget_solver/compiler.py` | 快照作用域展开、方程规范化（含自环系数 `1-k`）、依赖图、迭代 Tarjan SCC |
 | `budget_solver/solver.py` | SCC 分块精确 RREF、跨块自由变量传播、矛盾证书、内容缓存、报告发布 |
+| `budget_solver/quoting.py` | 订量符号化报价曲线、四分类目录、二次整数边界预算核对、曲线/预算落盘 |
 | `budget_solver/verifier.py` | 独立验证路径：重建事实、独立分块求解、代回/证书/哈希核对 |
-| `budget_solver/service.py` | 可重开门面：目录面/编译面/解算面/验证面 |
-| `budget_solver/cli.py` | `put-model` `snapshot` `compile` `solve` `query` `explain` `verify-*` |
+| `budget_solver/quote_verifier.py` | 报价曲线与预算报告的独立验证：独立符号推导、λ 证书复算、边界核算 |
+| `budget_solver/service.py` | 可重开门面：目录面/编译面/解算面/验证面/报价面/预算面 |
+| `budget_solver/cli.py` | `put-model` `snapshot` `compile` `solve` `query` `explain` `verify-*` `quote-*` `budget-*` |
 
 ## 关键设计决策
 
@@ -102,6 +114,87 @@ JSON 模型 ──put-model──▶ 目录 Catalog（修订/快照，文件持�
 * 参数表达式：6 组参数实例化符号代回，目标方程恒等成立；
 * 矛盾证书：按报告 λ 重算原方程组合，左端恒零、右端非零且与证书一致。
 
+## 数量报价曲线（报价员视角）
+
+报价员在**冻结作用域**（一份编译产物）里指定：
+
+* `q_variable`：一个真实**输入格**作订量 q（公式格作订量会被拒绝）；
+* `price_variable`：一个根**输出格**作单价；
+* 整数报价域 `[lo, hi]`，`lo ≥ 1`、至多十亿个整件数。
+
+### 符号化推导：系数固定，变化只进右端
+
+订量输入方程原本是 `q = 点值`（题面要求把冻结点值设 0）。曲线构建时该方程被
+符号参数取代——**系数矩阵原样保留，只有右端随 q 变化**，随后沿 SCC 拓扑做带
+q 参数列的精确分块 RREF。单价闭包里的格因此被精确表达为 `常数 + q 系数·q
+(+ 自由格参数)`。只把一次解出来的旧单价向前沿用，会把固定费率（q 系数为 0）
+和联动费率混在一起；这里由实际方程推出整条 `p(q) = a + b·q`，闭包允许有自由
+格，只要单价对同一 q 仍唯一。
+
+### 目录四分类（每条曲线都交代可用订量与来源方程）
+
+| 分类 | 判定 | 每订量状态 |
+| --- | --- | --- |
+| `unique_whole_domain` | 无零行约束、单价不含 q 以外自由参数 | 逐段 `quotable` / `negative_price`（负价不可报价） |
+| `partial_consistency` | 循环块留下 `0 = c0 + c1·q`，相容集合至多一个整数点 | 该点 `quotable`/`negative_price`/`non_unique`，其余 `inconsistent` |
+| `multi_price` | 无约束但单价表达式含自由格 | 全域 `non_unique` |
+| `fully_contradictory` | 零行 `0 = 非零常数`，与 q 无关 | 全域 `inconsistent` |
+
+约束与矛盾都附 λ 组合证书（来源方程变量 + 有理系数），曲线整体带内容哈希，
+`source_equations` 列出闭包全部方程、系数、右端与格哈希。`quote-at` 可单独求
+某个数量的单价，并回传 `scope_snapshots`——外部模型的**实际钉选版本**随曲线
+冻结，单点查询原样带出。
+
+### 题目主例（手算）
+
+冻结 q=0，循环式 `x = 2 + q/4 + x/2` 推出 `x(q) = 4 + q/2`，报价域 1..8 整域
+唯一且非负。价格表 1–3 件不返、4–8 件返 15、预算 12：
+
+* 实付 `max(0, q·x(q) − 当档回扣)`；
+* 可买极大连续段 **[1,2] 与 [4,4]**：第三件 33/2 = **16.5** 超预算，第四件
+  24 − 15 = **9** 可付；
+* 仅把 q 的系数改成 1/2：关系变 `x(q)=4+q`，原点单价仍为 4，但只剩 **[1,2]**；
+* 恢复原模型、仅把返 15 起点改为 3：可买 **[1,4]**。两版编译产物均保留，重开
+  数据目录后曲线、预算报告与外部钉选版本原样复读。
+
+## 采购额度核对（采购员视角）
+
+输入一份已发布曲线 + 预算规格：
+
+```json
+{
+  "domain": [1, 8],
+  "budget": "12",
+  "tiers": [
+    {"lo": 1, "hi": 3, "rebate": "0"},
+    {"lo": 4, "hi": 8, "rebate": "15"}
+  ]
+}
+```
+
+档表必须互不重叠、无缝覆盖所查数量域（落在报价域内），至多 30 档，回扣与
+预算非负。档内毛利 `g(q) = q·p(q) = b·q² + a·q` 是二次式，净付
+`max(0, g(q) − R) ≤ B` 等价于 `g(q) ≤ R + B`。二次函数只有一个顶点：按顶点
+切成两个单调半段，用**精确分数二分**求满足不等式的整数边界（无平方根、无
+浮点、无逐点枚举），再跨档合并相邻段。
+
+输出每个极大连续整数段附：
+
+* 端点订量、件数、端点单价与端点净付；
+* 紧邻未入段点的**原因**：`over_budget`（可报价但超预算）、`curve_negative_price`、
+  `curve_non_unique`、`curve_inconsistent` 或 `outside_query_domain`，并带该点
+  单价/净付/回扣，便于核查“能买四件为什么不能买三件”。
+
+预算可能一次跨过回扣断点：每个 (可报价段 × 回扣档) 矩形独立求边界后统一合并，
+既不枚举订量，也不假设单一全局分界。旧曲线可用新预算重算：每次核对产生新的
+不可变预算报告，`curve_id` / `curve_content_hash` 指回原合同，旧报告永不重写。
+
+### 部分订量相容的真实循环例
+
+`a = b + 3`、`b = a − 2q + 1` 两式相加得 `2q = 4`：**只有 q=2 相容**，其余订量
+矛盾；单价格 `c = a − b + 6` 在 q=2 唯一为 9。曲线分类 `partial_consistency`，
+预算核对只可能输出单点段 [2,2]，紧邻点原因标注 `curve_inconsistent`。
+
 ## 手算案例（tests/scenarios.py，全部有独立断言）
 
 | 案例 | 手算结论 |
@@ -125,6 +218,18 @@ python3 -m budget_solver.cli --data-root ./data query solve1 'M_ID::cell'
 python3 -m budget_solver.cli --data-root ./data explain solve1 'M_ID::cell'
 python3 -m budget_solver.cli --data-root ./data verify-compile <artifact>
 python3 -m budget_solver.cli --data-root ./data verify-solve solve1
+
+# 数量报价曲线与采购额度核对
+python3 -m budget_solver.cli --data-root ./data quote-curve <artifact> \
+    'M_ID::q' 'M_ID::price' --lo 1 --hi 1000000000 --label 报价曲线
+python3 -m budget_solver.cli --data-root ./data list-curves
+python3 -m budget_solver.cli --data-root ./data get-curve curve1
+python3 -m budget_solver.cli --data-root ./data quote-at curve1 37
+python3 -m budget_solver.cli --data-root ./data budget-check curve1 rebate-spec.json
+python3 -m budget_solver.cli --data-root ./data list-budget-reports
+python3 -m budget_solver.cli --data-root ./data get-budget-report budget1
+python3 -m budget_solver.cli --data-root ./data verify-curve curve1
+python3 -m budget_solver.cli --data-root ./data verify-budget budget1
 ```
 
 模型 JSON 示例：
@@ -155,6 +260,9 @@ python3 -m budget_solver.cli --data-root ./data verify-solve solve1
   artifacts/<hash12>.json           # 不可变编译产物
   reports/solveN.json + seq.json    # 不可变解算报告
   cache/index.json + closure-*.json # 内容寻址闭包缓存（可重开）
+  curves/curveN.json + seq.json     # 不可变报价曲线（含来源方程、证书、内容哈希）
+  budgets/budgetN.json + seq.json   # 不可变预算核对报告（指回 curve 合同）
 ```
 
-所有 JSON 经临时文件 + `os.replace` 原子写入。
+所有 JSON 经临时文件 + `os.replace` 原子写入。曲线与预算报告的序号 id 不参与
+内容寻址；内容哈希按去掉 id 的键集计算，独立验证器按同一键集复算。
