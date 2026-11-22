@@ -28,7 +28,7 @@ python3 -m address_delivery job --db /tmp/a.db P2
 python3 -m address_delivery catalog --db /tmp/a.db street --id S2
 ```
 
-测试：`python3 -m unittest discover -s tests`（78 项，覆盖下述全部场景）。
+测试：`python3 -m unittest discover -s tests`（118 项，覆盖下述全部场景）。
 
 ## 结构
 
@@ -111,3 +111,81 @@ python3 -m address_delivery catalog --db /tmp/a.db street --id S2
 | P7 | — | 西/东路 = 停用 S2 → 拒绝新派送 |
 
 最终已提交：P2/P5/P6（版本 1）+ P3/P4（版本 2）；P1、P7 无作业。
+
+## 合订分户订份册与逐期实报排投（`address_delivery/subscription/`）
+
+在不改动目录/作业库任何既有表的前提下，新增只属于订份侧的表，全部使用
+虚构住址与 `fractions.Fraction` 精确有理数，绝不引入浮点。
+
+| 模块 | 职责 |
+| --- | --- |
+| `subscription/rationals.py` | 分数字面量解析（`2/3`、`0.5`、`1`）与规范文本 |
+| `subscription/ledger.py` | 认门锚定、具名门箱时点登记、期初一次分配的分户批次、份额与源流账、闭箱登记 |
+| `subscription/scheduling.py` | 逐期实报排投的精确动态规划，最小化最大累计欠份 |
+
+### 认门与订份起点
+
+- 订份根只能锚定**真实成功（已冻结）的包裹**：`anchor_root` 读取
+  `DeliveryStore.get_job` 的冻结稳定街道/门牌，失败或从未提交的包裹被拒绝。
+- 锚定不重新解析目录、不查今天的覆盖；结合的是门箱登记中**在该包裹冻结
+  目录版本当时有效**的一行（`box_at(box, version)` 时点查询）。门箱事后
+  改名/换登记不会改写历史锚点证据，也不能按今天同名街的覆盖站倒推。
+- 门箱登记带 `effective_from_version`/`effective_to_version`，同一物理箱
+  可在新版本重新登记，历史版本仍可独立查。
+
+### 分户批次（只按期初快照分配一次）
+
+- `apply_split_batch(batch, effective_period, entries)` 在某期**期初、投递
+  之前**整批生效；同一期至多一批。每个旧户的非负有理比例和必须恰为 1，
+  未列旧户原样沿用；允许多旧户汇入同一新户、允许新旧同号（自留存）。
+- 批次只分配**期初快照一遍**：在本批从别的旧户收到份额、又被列为旧户的
+  跨条目身份会被整批拒绝（同批收益不能再分一次）。多级拆分要么在同批一次
+  合成比例，要么放到后续期的批次对真实期初份额再拆。
+- 每期每一户落一行 `sub_allocations`：精确分数、当期实投门箱、以及
+  `provenance`（每笔原订份根流来多少，独立可查）。后续批次永不重写既发
+  期或已消失户的历史。同箱多户按户分别持份。
+
+### 排投目标与精确解
+
+每期只有一份实报。领报条件：当期**正份额**且本户当期门箱**开放**。闭箱
+户的应得份额照记，只是不能领；若当期无人可领，该期单列 `blocked_periods`
+（不能排），不会硬投。目标是
+
+```
+min  max_{期末 t, 户 h} | 累计实得整份数 G_h(t) − 累计应得份额 E_h(t) |
+```
+
+无应得的期按零计，允许先多拿以后平衡。`Scheduler.schedule` 用精确分数
+动态规划在累计余额向量上求解（只对完全相同的有符号余额元组去重，不做
+跨向量剪枝——绝对值目标下符号相反的等优向量不可互替），并列时按领户
+序列字典序确定性任取。约束：最多 30 期、4 个稳定户号。
+
+`replan` 支持明年换箱/再分户：已发样刊期的领户被冻结校验，只重排未发
+期；若冻结领户在今天已不合格会报错，而不是篡改样刊真实资料。
+
+### 题目三案（均经真实成功包裹与分户单跑出）
+
+`python3 examples/newspaper_cases.py` 另含同箱两户与同批身份例：
+
+| 案 | 设置 | 最优最大绝对差 |
+| --- | --- | --- |
+| 1 | 开刊前 2:1 分 A/B，三期全开放 | 1/3（领户 A,B,A） |
+| 2 | 凭据更正为平分 | 1/2 |
+| 3 | 仍 2:1，B 箱仅第二期停投 | 2/3 |
+| 4 | A/B 迁入同一门箱，按户分别持份 | 1/3 |
+| 5 | 同批先分给又列作旧户 | 整批拒绝，给出两种合法多级拆法 |
+
+### 订份侧 CLI
+
+```bash
+python3 -m address_delivery register-box --db /tmp/a.db BX0 S3 2 老合订门户箱 1
+python3 -m address_delivery anchor --db /tmp/a.db R1 OLD NP1 BX0 --share 1
+python3 -m address_delivery split --db /tmp/a.db split.json      # 批次 JSON
+python3 -m address_delivery entitlements --db /tmp/a.db 3         # 精确应得+源流
+python3 -m address_delivery schedule --db /tmp/a.db 3 --close-box 2:BXB
+```
+
+`split.json` 形如
+`{"batch_id":"B1","effective_period":1,"entries":[{"old_household":"OLD",
+"new_household":"A","ratio":"2/3","box_id":"BXA"}, ...]}`。
+

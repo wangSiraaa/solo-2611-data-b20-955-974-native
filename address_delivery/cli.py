@@ -31,6 +31,13 @@ from .catalog import Catalog
 from .db import connect
 from .errors import CatalogError, InputFormatError
 from .service import AddressService
+from .subscription import (
+    Scheduler,
+    SplitEntry,
+    SubscriptionLedger,
+)
+from .subscription.errors import SubscriptionError
+from .subscription.rationals import frac_from_text
 
 
 def _load_json_arg(value: str):
@@ -193,6 +200,113 @@ def cmd_catalog(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Subscription ledger + scheduling commands
+# ---------------------------------------------------------------------------
+
+
+def _open_ledger(service: AddressService) -> SubscriptionLedger:
+    return SubscriptionLedger(service.conn, service.delivery)
+
+
+def cmd_register_box(args) -> int:
+    service = _open_service(args.db)
+    try:
+        ledger = _open_ledger(service)
+        registration = ledger.register_box(
+            args.box_id, args.street_id, args.house_no, args.label,
+            args.version, note=args.note or "",
+        )
+        _dump(registration.as_dict())
+    except SubscriptionError as exc:
+        _dump({"error": "subscription", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_anchor(args) -> int:
+    service = _open_service(args.db)
+    try:
+        ledger = _open_ledger(service)
+        anchor = ledger.anchor_root(
+            args.root_id, args.household, args.parcel, args.box,
+            initial_share=frac_from_text(args.share), note=args.note or "",
+        )
+        _dump(anchor.as_dict())
+    except SubscriptionError as exc:
+        _dump({"error": "subscription", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_split(args) -> int:
+    service = _open_service(args.db)
+    try:
+        ledger = _open_ledger(service)
+        document = _load_json_arg(args.split_doc)
+        entries = [
+            SplitEntry(
+                old_household=item["old_household"],
+                new_household=item["new_household"],
+                ratio=frac_from_text(item["ratio"]),
+                box_id=item["box_id"],
+            )
+            for item in document["entries"]
+        ]
+        batch = ledger.apply_split_batch(
+            document["batch_id"], int(document["effective_period"]), entries,
+            note=document.get("note", ""),
+        )
+        _dump(batch.as_dict())
+    except (SubscriptionError, KeyError, ValueError) as exc:
+        _dump({"error": "subscription", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_entitlements(args) -> int:
+    service = _open_service(args.db)
+    try:
+        ledger = _open_ledger(service)
+        periods = list(range(1, args.periods + 1))
+        _dump({
+            "households": ledger.household_universe(periods),
+            "allocations": [
+                a.as_dict() for a in ledger.entitlement_table(periods)
+            ],
+        })
+    except SubscriptionError as exc:
+        _dump({"error": "subscription", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
+def cmd_schedule(args) -> int:
+    service = _open_service(args.db)
+    try:
+        ledger = _open_ledger(service)
+        periods = list(range(1, args.periods + 1))
+        for closure in args.close_box or []:
+            period_text, box_id = closure.split(":", 1)
+            ledger.register_closure(int(period_text), box_id)
+        plan = Scheduler(ledger).schedule(periods)
+        _dump(plan.as_dict())
+    except (SubscriptionError, ValueError) as exc:
+        _dump({"error": "subscription", "message": str(exc)})
+        return 6
+    finally:
+        service.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="address_delivery")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -263,6 +377,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--district")
     p.add_argument("--street")
     p.set_defaults(func=cmd_catalog)
+
+    # -- subscription ledger / scheduling -----------------------------------
+    p = sub.add_parser("register-box", help="register a named mailbox from a catalog version")
+    p.add_argument("--db", required=True)
+    p.add_argument("box_id")
+    p.add_argument("street_id")
+    p.add_argument("house_no", type=int)
+    p.add_argument("label")
+    p.add_argument("version", type=int)
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_register_box)
+
+    p = sub.add_parser("anchor", help="anchor a root subscription on a successful parcel")
+    p.add_argument("--db", required=True)
+    p.add_argument("root_id")
+    p.add_argument("household")
+    p.add_argument("parcel")
+    p.add_argument("box")
+    p.add_argument("--share", default="1")
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_anchor)
+
+    p = sub.add_parser("split", help="apply one split batch from a JSON document")
+    p.add_argument("--db", required=True)
+    p.add_argument("split_doc")
+    p.set_defaults(func=cmd_split)
+
+    p = sub.add_parser("entitlements", help="exact per-period entitlements and root flow")
+    p.add_argument("--db", required=True)
+    p.add_argument("periods", type=int)
+    p.set_defaults(func=cmd_entitlements)
+
+    p = sub.add_parser("schedule", help="optimal per-issue dispatch plan")
+    p.add_argument("--db", required=True)
+    p.add_argument("periods", type=int)
+    p.add_argument("--close-box", action="append", help="period:box_id closure, repeatable")
+    p.set_defaults(func=cmd_schedule)
 
     return parser
 
