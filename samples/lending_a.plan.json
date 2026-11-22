@@ -1,0 +1,214 @@
+{
+  "specs": [
+    {
+      "spec_id": 0,
+      "link_type": 1,
+      "max_saved_bytes": 256,
+      "time_unit": "1/2",
+      "origin": 0
+    },
+    {
+      "spec_id": 1,
+      "link_type": 1,
+      "max_saved_bytes": 256,
+      "time_unit": "1/5",
+      "origin": 0
+    }
+  ],
+  "segments": [
+    {
+      "segment_id": 0,
+      "section_id": 0,
+      "interface_id": 0,
+      "link_type": 1,
+      "packet_count": 1
+    },
+    {
+      "segment_id": 1,
+      "section_id": 1,
+      "interface_id": 0,
+      "link_type": 1,
+      "packet_count": 1
+    }
+  ],
+  "compatibility": [
+    {
+      "segment_id": 0,
+      "spec_id": 0,
+      "compatible": true,
+      "ticks": [
+        1
+      ],
+      "first_evidence": null
+    },
+    {
+      "segment_id": 0,
+      "spec_id": 1,
+      "compatible": false,
+      "ticks": null,
+      "first_evidence": {
+        "occurrence_position": 0,
+        "source": {
+          "section_id": 0,
+          "interface_id": 0,
+          "packet_index": 0
+        },
+        "check": "tick_not_integer",
+        "actual": "5/2",
+        "expected": "integer"
+      }
+    },
+    {
+      "segment_id": 1,
+      "spec_id": 0,
+      "compatible": false,
+      "ticks": null,
+      "first_evidence": {
+        "occurrence_position": 0,
+        "source": {
+          "section_id": 1,
+          "interface_id": 0,
+          "packet_index": 1
+        },
+        "check": "tick_not_integer",
+        "actual": "2/5",
+        "expected": "integer"
+      }
+    },
+    {
+      "segment_id": 1,
+      "spec_id": 1,
+      "compatible": true,
+      "ticks": [
+        1
+      ],
+      "first_evidence": null
+    }
+  ],
+  "prefix_credentials": [
+    {
+      "earlier_ordinal": 0,
+      "later_ordinal": 1,
+      "earlier_source": {
+        "section_id": 0,
+        "interface_id": 0,
+        "packet_index": 0
+      },
+      "later_source": {
+        "section_id": 1,
+        "interface_id": 0,
+        "packet_index": 1
+      },
+      "byte_range": [
+        0,
+        21
+      ]
+    }
+  ],
+  "min_volumes": 2,
+  "min_total_slots": 2,
+  "quotations": [
+    {
+      "direct_bytes": 42,
+      "tape_travel": 0,
+      "volume_set": {
+        "min_volumes": 2,
+        "min_total_slots": 2,
+        "direct_bytes": 42,
+        "tape_travel": 0,
+        "tap_counts": [
+          {
+            "segment_id": 0,
+            "position": 0,
+            "count": 1
+          },
+          {
+            "segment_id": 1,
+            "position": 0,
+            "count": 1
+          }
+        ],
+        "specs": [
+          {
+            "spec_id": 0,
+            "link_type": 1,
+            "max_saved_bytes": 256,
+            "time_unit": "1/2",
+            "origin": 0
+          },
+          {
+            "spec_id": 1,
+            "link_type": 1,
+            "max_saved_bytes": 256,
+            "time_unit": "1/5",
+            "origin": 0
+          }
+        ],
+        "volumes": [
+          {
+            "volume_id": 0,
+            "slot_count": 1,
+            "segments": [
+              0
+            ],
+            "records": [
+              {
+                "line": 0,
+                "slot": 0,
+                "spec_id": 0,
+                "tick": 1,
+                "segment_id": 0,
+                "position": 0,
+                "source": {
+                  "section_id": 0,
+                  "interface_id": 0,
+                  "packet_index": 0
+                },
+                "body_range": [
+                  128,
+                  149
+                ],
+                "orig_len": 21,
+                "captured_len": 21,
+                "truncated": false,
+                "mode": "direct",
+                "bytes_hex": "73796e7468657469632d7368617265642d626f6479"
+              }
+            ]
+          },
+          {
+            "volume_id": 1,
+            "slot_count": 1,
+            "segments": [
+              1
+            ],
+            "records": [
+              {
+                "line": 0,
+                "slot": 0,
+                "spec_id": 1,
+                "tick": 1,
+                "segment_id": 1,
+                "position": 0,
+                "source": {
+                  "section_id": 1,
+                  "interface_id": 0,
+                  "packet_index": 1
+                },
+                "body_range": [
+                  288,
+                  309
+                ],
+                "orig_len": 21,
+                "captured_len": 21,
+                "truncated": false,
+                "mode": "direct",
+                "bytes_hex": "73796e7468657469632d7368617265642d626f6479"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
