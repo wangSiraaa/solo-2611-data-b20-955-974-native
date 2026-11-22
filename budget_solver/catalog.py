@@ -34,9 +34,15 @@ _ALLOWED_TOP_KEYS = {
     "description",
     "cells",
     "outputs",
+    # 分日回款产品：horizon 存在即声明“按日展开”的快照；day0_seed 提供第 0 日
+    # 所需的前日垫底值（键为 "CELL" 或 "MODEL_ID::CELL"）。
+    "horizon",
+    "day0_seed",
 }
-_ALLOWED_CELL_KEYS = {"cell_id", "kind", "value", "constant", "terms"}
-_ALLOWED_TERM_KEYS = {"coef", "model_id", "cell_id"}
+_ALLOWED_CELL_KEYS = {"cell_id", "kind", "value", "constant", "terms", "daily"}
+_ALLOWED_TERM_KEYS = {"coef", "model_id", "cell_id", "lag"}
+
+MAX_HORIZON = 20
 
 
 class Catalog:
@@ -89,7 +95,7 @@ class Catalog:
             )
         norm = {"cell_id": cell_id, "kind": kind}
         if kind == "input":
-            if "value" not in raw:
+            if "value" not in raw and "daily" not in raw:
                 raise ValidationError(
                     f"输入格 {cell_id} 必须提供 value", [f"cell={cell_id}"]
                 )
@@ -97,8 +103,41 @@ class Catalog:
                 raise ValidationError(
                     f"输入格 {cell_id} 不允许带 terms", [f"cell={cell_id}"]
                 )
-            norm["value"] = qstr(parse_rational(raw["value"], field=f"cell {cell_id}.value"))
+            norm["value"] = qstr(
+                parse_rational(raw.get("value", 0), field=f"cell {cell_id}.value")
+            )
+            if "daily" in raw:
+                daily_raw = raw["daily"]
+                if not isinstance(daily_raw, dict) or not daily_raw:
+                    raise ValidationError(
+                        f"格 {cell_id} 的 daily 必须是非空对象", [f"cell={cell_id}"]
+                    )
+                daily = {}
+                for day_key, day_value in daily_raw.items():
+                    try:
+                        day = int(day_key)
+                    except (TypeError, ValueError):
+                        raise ValidationError(
+                            f"格 {cell_id} 的 daily 键必须是整数日",
+                            [f"cell={cell_id}"],
+                        ) from None
+                    if day < 0 or day > MAX_HORIZON:
+                        raise ValidationError(
+                            f"格 {cell_id} 的 daily 日 {day} 超出 0..{MAX_HORIZON}",
+                            [f"cell={cell_id}"],
+                        )
+                    daily[day] = qstr(
+                        parse_rational(
+                            day_value, field=f"cell {cell_id}.daily[{day}]"
+                        )
+                    )
+                norm["daily"] = {str(k): daily[k] for k in sorted(daily)}
             return norm
+        if "daily" in raw:
+            raise ValidationError(
+                f"公式格 {cell_id} 不允许 daily（只有输入格可按日给值）",
+                [f"cell={cell_id}"],
+            )
         # formula
         constant = parse_rational(
             raw.get("constant", 0), field=f"cell {cell_id}.constant"
@@ -124,17 +163,23 @@ class Catalog:
             coef = parse_rational(
                 term.get("coef", 1), field=f"cell {cell_id}.terms[{index}].coef"
             )
+            lag = term.get("lag", 0)
+            if lag not in (0, 1):
+                raise ValidationError(
+                    f"格 {cell_id} 第 {index} 项 lag 只允许 0（当天）或 1（前一日）",
+                    [f"cell={cell_id}"],
+                )
             ref_model = term.get("model_id")  # None 在归一时补上本模型 id
             ref_cell = term["cell_id"]
             if not isinstance(ref_cell, str) or not ref_cell:
                 raise ValidationError(
                     f"格 {cell_id} 第 {index} 项 cell_id 非法", [f"cell={cell_id}"]
                 )
-            key = (ref_model, ref_cell)
+            key = (ref_model, ref_cell, lag)
             merged[key] = merged.get(key, 0) + coef
         terms = []
-        for (ref_model, ref_cell), coef in sorted(
-            merged.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])
+        for (ref_model, ref_cell, lag), coef in sorted(
+            merged.items(), key=lambda kv: (str(kv[0][0]), kv[0][1], kv[0][2])
         ):
             if coef == 0:
                 continue
@@ -143,6 +188,7 @@ class Catalog:
                     "coef": qstr(coef),
                     "model_id": ref_model,  # None 先占位，随后统一补全
                     "cell_id": ref_cell,
+                    "lag": lag,
                 }
             )
         norm["terms"] = terms
@@ -213,6 +259,58 @@ class Catalog:
                 "非法引用，整次修订拒绝", sorted(ref_errors)
             )
         cell_hashes = {cid: content_hash(cell) for cid, cell in normalized.items()}
+        horizon = payload.get("horizon")
+        day0_seed = {}
+        if horizon is not None:
+            if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+                raise ValidationError(
+                    "horizon 必须是正整数天数", ["horizon"]
+                )
+            if horizon > MAX_HORIZON:
+                raise ValidationError(
+                    f"每日快照最多 {MAX_HORIZON} 天", ["horizon"]
+                )
+            seed_raw = payload.get("day0_seed") or {}
+            if not isinstance(seed_raw, dict):
+                raise ValidationError("day0_seed 必须是对象", ["day0_seed"])
+            seed_errors = []
+            for raw_key, raw_value in seed_raw.items():
+                if not isinstance(raw_key, str) or not raw_key:
+                    seed_errors.append(f"day0_seed 键 {raw_key!r} 非法")
+                    continue
+                if "::" in raw_key:
+                    seed_model, seed_cell = raw_key.split("::", 1)
+                else:
+                    seed_model, seed_cell = model_id, raw_key
+                cell = normalized.get(seed_cell) if seed_model == model_id else None
+                if seed_model != model_id:
+                    target_meta = self._meta["models"].get(seed_model)
+                    if target_meta is None:
+                        seed_errors.append(
+                            f"day0_seed 指向不存在的模型 {seed_model}"
+                        )
+                        continue
+                    head = self.get_head_revision(seed_model)
+                    if seed_cell not in head["cells"]:
+                        seed_errors.append(
+                            f"day0_seed 指向 {seed_model} 中不存在的格 {seed_cell}"
+                        )
+                        continue
+                elif cell is None:
+                    seed_errors.append(f"day0_seed 指向本模型不存在的格 {seed_cell}")
+                    continue
+                try:
+                    day0_seed[f"{seed_model}::{seed_cell}"] = qstr(
+                        parse_rational(raw_value, field=f"day0_seed[{raw_key}]")
+                    )
+                except ValidationError as exc:
+                    seed_errors.extend(exc.errors or [str(exc)])
+            if seed_errors:
+                raise ValidationError("day0_seed 非法", sorted(seed_errors))
+        elif "day0_seed" in payload:
+            raise ValidationError(
+                "day0_seed 只能与 horizon 一起使用", ["day0_seed"]
+            )
         return {
             "model_id": model_id,
             "name": name,
@@ -221,6 +319,8 @@ class Catalog:
             "outputs": outputs,
             "external_refs": external,
             "cell_hashes": cell_hashes,
+            "horizon": horizon,
+            "day0_seed": day0_seed,
         }
 
     def _inbound_check(self, model_id, new_cell_ids):
@@ -268,6 +368,8 @@ class Catalog:
             "outputs": norm["outputs"],
             "external_refs": norm["external_refs"],
             "cell_hashes": norm["cell_hashes"],
+            "horizon": norm["horizon"],
+            "day0_seed": norm["day0_seed"],
             "created_at": utc_now_iso(),
         }
         record["content_hash"] = content_hash(
@@ -345,6 +447,8 @@ class Catalog:
             "outputs": head["outputs"],
             "cell_hashes": head["cell_hashes"],
             "external_refs": pinned,
+            "horizon": head.get("horizon"),
+            "day0_seed": head.get("day0_seed", {}),
             "created_at": utc_now_iso(),
         }
         snapshot["content_hash"] = content_hash(

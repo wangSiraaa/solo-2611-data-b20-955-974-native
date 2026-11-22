@@ -11,13 +11,74 @@
 
 from fractions import Fraction
 
-from .compiler import var_name
+from .compiler import daily_var, var_name
 from .errors import VerifyError
 from .solver import rref_augmented
 from .util import content_hash
 
 
 # ------------------------------------------------- 独立地从快照重建事实
+def _snapshot_cell_index(scope_snapshots, catalog):
+    """{model_id: snapshot}，用于分日重建。"""
+    index = {}
+    for mid, pin in scope_snapshots.items():
+        snap = catalog.get_snapshot(pin["snap_id"])
+        if snap["model_id"] != mid:
+            raise VerifyError(f"快照 {pin['snap_id']} 与模型 {mid} 不匹配")
+        index[mid] = snap
+    return index
+
+
+def rebuild_daily_facts(catalog, scope_snapshots, root_model_id, horizon):
+    """独立按日重建变量、方程、引用边与跨日边（不读编译产物）。"""
+    snaps = _snapshot_cell_index(scope_snapshots, catalog)
+    variables = {}
+    for mid, snap in snaps.items():
+        for cell_id in snap["cells"]:
+            for day in range(1, horizon + 1):
+                v = daily_var(mid, cell_id, day)
+                variables[v] = {
+                    "kind": snap["cells"][cell_id]["kind"],
+                    "cell_hash": snap["cell_hashes"][cell_id],
+                }
+    seed = snaps[root_model_id].get("day0_seed") or {}
+    equations = {}
+    edges = {}
+    temporal = set()
+    for mid, snap in snaps.items():
+        for cell_id, cell in snap["cells"].items():
+            for day in range(1, horizon + 1):
+                v = daily_var(mid, cell_id, day)
+                coeffs = {v: Fraction(1)}
+                if cell["kind"] == "input":
+                    daily = cell.get("daily") or {}
+                    rhs = Fraction(daily.get(str(day), cell["value"]))
+                else:
+                    rhs = Fraction(cell["constant"])
+                    for term in cell["terms"]:
+                        ref = daily_var(term["model_id"], term["cell_id"], day)
+                        coef = Fraction(term["coef"])
+                        lag = term.get("lag", 0)
+                        if lag == 0:
+                            if ref not in variables:
+                                raise VerifyError(f"分日快照悬挂引用 {v} -> {ref}")
+                            coeffs[ref] = coeffs.get(ref, Fraction(0)) - coef
+                            edges.setdefault(v, set()).add(ref)
+                        elif day >= 2:
+                            ref_prev = daily_var(term["model_id"], term["cell_id"], day - 1)
+                            coeffs[ref_prev] = coeffs.get(ref_prev, Fraction(0)) - coef
+                            edges.setdefault(v, set()).add(ref_prev)
+                            temporal.add((v, ref_prev))
+                        else:
+                            key = f"{term['model_id']}::{term['cell_id']}"
+                            if key not in seed:
+                                raise VerifyError(f"缺少第 0 日垫底值 {key}")
+                            rhs += coef * Fraction(seed[key])
+                equations[v] = (coeffs, rhs)
+                edges.setdefault(v, set())
+    return variables, equations, edges, temporal
+
+
 def rebuild_facts(catalog, scope_snapshots):
     """根据报告/产物里钉住的快照清单，重建变量、方程与引用边。"""
     equations = {}
@@ -89,10 +150,10 @@ def independent_block_solve(equations, closure, scc_partition, topo_index):
         for v in members:
             for ref in equations[v][0]:
                 if ref not in local and known[ref][0] == "expr":
-                    upstream.add(ref)
+                    # 参数列必须取真正的自由叶子，而不是中间表达式变量名。
+                    upstream.update(known[ref][2].keys())
                     free_params.update(known[ref][2].keys())
         upstream = sorted(upstream)
-        free_params.update(upstream)
 
         n = len(members)
         mat = [[Fraction(0)] * n for _ in range(n)]
@@ -185,6 +246,8 @@ def parse_expression(expr):
 
 # ========================================================= 验证入口
 def verify_compile(catalog, artifact):
+    if artifact.get("artifact_kind") == "compiled_daily_equations":
+        return verify_daily_compile(catalog, artifact)
     checks = []
 
     def record(name, ok, detail=""):
@@ -228,6 +291,8 @@ def verify_compile(catalog, artifact):
 
 
 def verify_solve(catalog, artifact, report):
+    if artifact.get("artifact_kind") == "compiled_daily_equations":
+        return verify_daily_solve(catalog, artifact, report)
     checks = []
 
     def record(name, ok, detail=""):
@@ -375,3 +440,184 @@ def check_parametric_identity(catalog, equations, closure, classified, partition
             lhs == rhs,
             f"lhs={lhs} rhs={rhs}",
         )
+
+
+# ========================================================= 分日独立验证
+def verify_daily_compile(catalog, artifact):
+    checks = []
+
+    def record(name, ok, detail=""):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+        if not ok:
+            raise VerifyError(f"分日编译产物验证失败：{name} {detail}")
+
+    horizon = artifact["horizon"]
+    variables, equations, edges, temporal = rebuild_daily_facts(
+        catalog,
+        artifact["scope_snapshots"],
+        artifact["root_model_id"],
+        horizon,
+    )
+    _apply_daily_perturbation(artifact, equations)
+    record("分日变量集合与快照一致", set(variables) == set(artifact["variables"]))
+    for v, (coeffs, rhs) in equations.items():
+        eq = artifact["equations"][v]
+        record(f"{v} 分日右端项", rhs == Fraction(eq["rhs"]),
+               f"rhs={rhs} vs {eq['rhs']}")
+        art_full = {k: Fraction(0) for k in variables}
+        art_full.update({k: Fraction(val) for k, val in eq["coeffs"].items()})
+        full = {k: Fraction(0) for k in variables}
+        full.update(coeffs)
+        record(f"{v} 分日方程系数", full == art_full)
+    art_edges = {}
+    for edge in artifact["dependency_edges"]:
+        art_edges.setdefault(edge["from"], set()).add(edge["to"])
+    for v in variables:
+        record(f"{v} 分日引用边", edges.get(v, set()) == art_edges.get(v, set()))
+    # 跨日边在依赖图里指向“前一天的另一个变量名”，不构成当天自环。
+    declared = {
+        (edge["from"], edge["to"]) for edge in artifact.get("temporal_edges", [])
+    }
+    record(
+        "跨日边与独立重建一致",
+        declared == temporal,
+        f"declared={len(declared)} rebuilt={len(temporal)}",
+    )
+    record(
+        "每个跨日边都是相邻两天且不同变量",
+        all(
+            _is_temporal_pair(a, b) and a != b and "@" in a and "@" in b
+            for a, b in declared
+        ),
+        f"{sorted(declared)[:3]}",
+    )
+    partition = {c["scc_id"]: c["variables"] for c in artifact["components"]}
+    topo = {c["scc_id"]: c["topo_index"] for c in artifact["components"]}
+    for cid, members in partition.items():
+        cyclic = len(members) > 1 or members[0] in edges.get(members[0], set())
+        record(
+            f"{cid} 分日循环标记正确",
+            cyclic == next(c["cyclic"] for c in artifact["components"]
+                           if c["scc_id"] == cid),
+        )
+        # 同一 SCC 内的变量必须同日，跨日项不得合并
+        record(
+            f"{cid} 不跨越两个计算日",
+            len({_day_of(m) for m in members}) == 1,
+        )
+    expect_hash = content_hash(
+        {k: v for k, v in artifact.items() if k != "artifact_hash"}
+    )
+    record("分日产物内容哈希", expect_hash == artifact["artifact_hash"])
+    return {"ok": True, "checks": checks, "check_count": len(checks)}
+
+
+def verify_daily_solve(catalog, artifact, report):
+    checks = []
+
+    def record(name, ok, detail=""):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+        if not ok:
+            raise VerifyError(f"分日解算报告验证失败：{name} {detail}")
+
+    record("报告绑定的产物哈希", report["artifact_hash"] == artifact["artifact_hash"])
+    variables, equations, edges, temporal = rebuild_daily_facts(
+        catalog,
+        report["scope_snapshots"],
+        artifact["root_model_id"],
+        artifact["horizon"],
+    )
+    _apply_daily_perturbation(artifact, equations)
+    record(
+        "报告作用域与产物作用域一致",
+        set(report["scope_snapshots"]) == set(artifact["scope_snapshots"]),
+    )
+    partition = {c["scc_id"]: c["variables"] for c in artifact["components"]}
+    topo = {c["scc_id"]: c["topo_index"] for c in artifact["components"]}
+    for target, output in sorted(report["outputs"].items()):
+        closure = rebuild_closure(edges, target)
+        record(f"{target} 分日依赖闭包独立重建一致",
+               closure == output["actual_dependencies"])
+        result, certs = independent_block_solve(equations, closure, partition, topo)
+        if output["status"] == "inconsistent":
+            record(f"{target} 分日独立复算无解", result is None)
+            check_certificates(catalog, equations, output, certs, record, target)
+            continue
+        classified, free_params = result
+        info = classified[target]
+        if output["status"] == "determined":
+            record(f"{target} 分日独立复算唯一确定", info[0] == "fixed")
+            record(f"{target} 分日确定值一致",
+                   info[1] == Fraction(output["value"]), output["value"])
+            assignment = {v: Fraction(0) for v in closure}
+            for v in closure:
+                if classified[v][0] == "fixed":
+                    assignment[v] = classified[v][1]
+            nonzero = [
+                (v, str(r)) for v, r in substitute_all(equations, closure, assignment)
+                if r != 0
+            ]
+            record(f"{target} 分日代回全部闭包方程残差为 0", not nonzero, str(nonzero))
+        else:
+            record(f"{target} 分日独立复算为非唯一", info[0] == "expr")
+            const, parts = parse_expression(output["expression"])
+            if info[0] == "expr":
+                record(f"{target} 分日表达式常数一致", const == info[1])
+                record(f"{target} 分日参数系数一致", parts == info[2])
+            check_parametric_identity(
+                catalog, equations, closure, classified, partition, topo,
+                report, target, record,
+            )
+    section_vars = {
+        "determined": {r["variable"] for r in report["sections"]["determined"]},
+        "undetermined_parameters": {
+            r["variable"] for r in report["sections"]["undetermined_parameters"]
+        },
+        "contradictions": {r["variable"] for r in report["sections"]["contradictions"]},
+    }
+    status_vars = {"determined": set(), "parametric": set(), "inconsistent": set()}
+    for v, o in report["outputs"].items():
+        status_vars[o["status"]].add(v)
+    record(
+        "分日发布分区与输出状态一致",
+        section_vars["determined"] == status_vars["determined"]
+        and section_vars["undetermined_parameters"] == status_vars["parametric"]
+        and section_vars["contradictions"] == status_vars["inconsistent"],
+    )
+    expect_hash = content_hash(
+        {k: v for k, v in report.items() if k != "report_hash"}
+    )
+    record("分日报告内容哈希", expect_hash == report["report_hash"])
+    return {"ok": True, "checks": checks, "check_count": len(checks)}
+
+
+def _is_temporal_pair(from_var, to_var):
+    """引用是新日变量指向紧邻的前一日变量（允许跨格/跨模型）。"""
+    try:
+        from_day = int(from_var.rsplit("@", 1)[1])
+        to_day = int(to_var.rsplit("@", 1)[1])
+    except (ValueError, IndexError):
+        return False
+    return from_day == to_day + 1
+
+
+def _apply_daily_perturbation(artifact, equations):
+    """派生扰动（外部入账某日 +delta）：独立重建后按同样规则改写右端。"""
+    perturbation = artifact.get("perturbation")
+    if not perturbation:
+        return
+    if perturbation.get("kind") != "external_input_rhs_add":
+        raise VerifyError(f"未知派生扰动类型 {perturbation.get('kind')}")
+    v = daily_var(
+        perturbation["model_id"], perturbation["cell_id"], perturbation["day"]
+    )
+    if v not in equations:
+        raise VerifyError(f"派生扰动指向不存在的变量 {v}")
+    coeffs, rhs = equations[v]
+    if len(coeffs) != 1 or coeffs.get(v) != 1:
+        raise VerifyError(f"派生扰动只能作用于输入格 {v}")
+    equations[v] = (coeffs, rhs + Fraction(perturbation["delta"]))
+
+
+def _day_of(variable):
+    return int(variable.rsplit("@", 1)[1])

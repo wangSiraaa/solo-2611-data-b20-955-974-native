@@ -17,6 +17,7 @@
 import os
 from fractions import Fraction
 
+from .compiler import daily_var
 from .errors import BudgetError, NotFoundError
 from .rationals import qstr
 from .util import (
@@ -110,7 +111,15 @@ def dependency_closure(artifact, target_variable):
 
 def _closure_fingerprint(artifact, closure):
     material = [(v, artifact["variables"][v]["cell_hash"]) for v in closure]
-    return content_hash({"schema": CACHE_SCHEMA_VERSION, "cells": material})[7:]
+    return content_hash(
+        {
+            "schema": CACHE_SCHEMA_VERSION,
+            "cells": material,
+            # 派生产物（如“某外部入账 +1”的扰动）用盐区分缓存，避免与原始
+            # 闭包撞指纹；格哈希本身保持与快照一致，不做篡改。
+            "salt": artifact.get("cache_salt"),
+        }
+    )[7:]
 
 
 def _expr_json(constant, param_parts, all_params):
@@ -149,7 +158,8 @@ def solve_closure(artifact, closure):
     for cid in block_ids:
         members = [v for v in components[cid]["variables"] if v in closure_set]
         local_index = {v: i for i, v in enumerate(members)}
-        # 收集上游参数（出现在本块方程里、已被分类为表达式/自由的格）
+        # 收集上游参数：增广列必须是真正的自由叶子参数（parts 的键），
+        # 而不是中间表达式变量名——否则 a=b 自由、s=a 时会把 s 误判为定值。
         upstream_params = set()
         for v in members:
             for ref_var in artifact["equations"][v]["coeffs"]:
@@ -157,10 +167,9 @@ def solve_closure(artifact, closure):
                     continue
                 info = known[ref_var]
                 if info[0] == "expr":
-                    upstream_params.add(ref_var)
+                    upstream_params.update(info[2].keys())
                     free_params.update(info[2].keys())
         upstream_params = sorted(upstream_params)
-        free_params.update(upstream_params)
 
         n = len(members)
         matrix = [[Fraction(0)] * n for _ in range(n)]
@@ -310,7 +319,12 @@ class SolverService:
     # ------------------------------------------------------------ solve 入口
     def solve(self, artifact, solve_config=None):
         config = solve_config or {"mode": "scc_block_rref_exact", "use_cache": True}
+        is_daily = artifact.get("artifact_kind") == "compiled_daily_equations"
         outputs = artifact["root_outputs"]
+        if is_daily:
+            # 分日报告同时覆盖作用域内全部模型声明的输出格（逐日），
+            # 以便从上游模型（例如带滞后的回款模型）取各日定数。
+            outputs = self._daily_report_targets(artifact)
         output_results = {}
         used_fingerprints = []
         cache_hits = []
@@ -330,9 +344,11 @@ class SolverService:
                 "variable": target,
                 "model_id": artifact["variables"][target]["model_id"],
                 "cell_id": artifact["variables"][target]["cell_id"],
+                "day": artifact["variables"][target].get("day"),
                 "status": info["status"],
                 "value": info.get("value"),
                 "expression": info.get("expression"),
+                "free_variables": result.get("free_variables", []),
                 "actual_dependencies": closure,
                 "in_cyclic_scc": comp["cyclic"],
                 "scc_id": comp_id,
@@ -357,6 +373,21 @@ class SolverService:
             artifact, config, output_results, used_fingerprints, cache_hits
         )
         return report
+
+    @staticmethod
+    def _daily_report_targets(artifact):
+        """分日: 全部格逐日纳入报告（根输出在前）。
+
+        这样“选定回款格”可以指向作用域内任意格并先核对唯一性，而不是被迫
+        只依赖 outputs 声明；不相关格各自独立成闭包，互不阻断。
+        """
+        targets = list(artifact["root_outputs"])
+        seen = set(targets)
+        for v in sorted(artifact["variables"]):
+            if v not in seen:
+                targets.append(v)
+                seen.add(v)
+        return targets
 
     def _publish_report(self, artifact, config, output_results, fingerprints, hits):
         determined, parametric, inconsistent = [], [], []
@@ -394,6 +425,7 @@ class SolverService:
             "solve_id": solve_id,
             "created_at": utc_now_iso(),
             "artifact_hash": artifact["artifact_hash"],
+            "artifact_kind": artifact.get("artifact_kind", "compiled_equations"),
             "root_model_id": artifact["root_model_id"],
             "root_snap_id": artifact["root_snap_id"],
             "solve_config": config,
@@ -410,11 +442,77 @@ class SolverService:
                 "fingerprints_hit": sorted(set(hits)),
             },
         }
+        if artifact.get("artifact_kind") == "compiled_daily_equations":
+            self._attach_daily_sections(report, artifact)
         report["report_hash"] = content_hash(
             {k: v for k, v in report.items() if k != "report_hash"}
         )
         write_json_atomic(os.path.join(self.report_dir, f"{solve_id}.json"), report)
         return report
+
+    @staticmethod
+    def _attach_daily_sections(report, artifact):
+        """把逐日结果按模型/格聚合，并拆出矛盾与不确定来源，互不阻断。"""
+        horizon = artifact["horizon"]
+        products = {}
+        for v, out in report["outputs"].items():
+            mid, cell_id = out["model_id"], out["cell_id"]
+            by_day = products.setdefault(mid, {}).setdefault(cell_id, {})
+            entry = {
+                "status": out["status"],
+                "value": out.get("value"),
+                "expression": out.get("expression"),
+                "in_cyclic_scc": out["in_cyclic_scc"],
+            }
+            if out["status"] == "inconsistent":
+                entry["contradictions"] = out["contradictions"]
+                entry["source"] = out["failure_source"]
+            if out["status"] == "parametric":
+                entry["free_variables"] = out["free_variables"]
+            by_day[str(out["day"])] = entry
+        report["horizon"] = horizon
+        report["model_outputs"] = {
+            mid: list(cells) for mid, cells in (artifact.get("model_outputs") or {}).items()
+        }
+        report["daily_products"] = {
+            mid: {
+                cell_id: {str(d): by_day[str(d)] for d in range(1, horizon + 1)
+                          if str(d) in by_day}
+                for cell_id, by_day in sorted(cells.items())
+            }
+            for mid, cells in sorted(products.items())
+        }
+        # 作用域格词表：供现金柜/扰动工具核对“这是哪个模型的哪个外部入账格”。
+        vocabulary = {}
+        for v, meta in artifact["variables"].items():
+            entry = vocabulary.setdefault(
+                meta["model_id"], {"cells": {}}
+            )
+            entry["cells"][meta["cell_id"]] = {
+                "kind": meta["kind"],
+                "cell_hash": meta["cell_hash"],
+            }
+        report["model_vocabulary"] = vocabulary
+        # 不相关表/格不阻断：逐模型列出问题来源
+        issues = {}
+        for v, out in report["outputs"].items():
+            if out["status"] == "determined":
+                continue
+            model_id, _, rest = v.partition("::")
+            cell_id = rest.rsplit("@", 1)[0]
+            issues.setdefault(model_id, []).append(
+                {
+                    "variable": v,
+                    "cell_id": cell_id,
+                    "day": out.get("day"),
+                    "status": out["status"],
+                    "contradictions": out.get("contradictions"),
+                }
+            )
+        report["daily_dependency_issues"] = {
+            mid: rows for mid, rows in sorted(issues.items())
+        }
+
 
     # ------------------------------------------------------------ 查询/解释
     def get_report(self, solve_id):

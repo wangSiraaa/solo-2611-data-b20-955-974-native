@@ -17,10 +17,26 @@ from .errors import CompileError
 from .util import content_hash, ensure_dir, read_json, write_json_atomic
 
 EQUATION_SCHEMA_VERSION = 1
+DAILY_SCHEMA_VERSION = 1
 
 
 def var_name(model_id, cell_id):
     return f"{model_id}::{cell_id}"
+
+
+def daily_var(model_id, cell_id, day):
+    """分日变量的规范名：``MODEL::cell@day``（day 从 1 起）。"""
+    return f"{model_id}::{cell_id}@{day}"
+
+
+def split_daily_var(variable):
+    base, _, day = variable.rpartition("@")
+    model_id, _, cell_id = base.partition("::")
+    return model_id, cell_id, int(day)
+
+
+def is_daily_var(variable):
+    return "@" in variable.rpartition("::")[2]
 
 
 # ------------------------------------------------------------ 迭代 Tarjan SCC
@@ -126,6 +142,13 @@ class Compiler:
             snap = scope[mid]
             for cell_id in sorted(snap["cells"]):
                 cell = snap["cells"][cell_id]
+                if cell.get("daily") or any(
+                    term.get("lag", 0) for term in cell.get("terms", [])
+                ):
+                    raise CompileError(
+                        f"格 {mid}::{cell_id} 含分日输入或跨日项，"
+                        f"必须由声明 horizon 的根模型按日编译"
+                    )
                 vname = var_name(mid, cell_id)
                 variables[vname] = {
                     "model_id": mid,
@@ -172,8 +195,232 @@ class Compiler:
                 variables[vname]["deps"] = deps
         return variables, equations, adjacency
 
+    @staticmethod
+    def _build_daily_variables(scope, root_model):
+        """按日展开变量表；horizon 由根模型快照声明，上游模型沿用同一日历。"""
+        horizon = scope[root_model].get("horizon")
+        if horizon is None:
+            raise CompileError("分日编译要求根模型声明 horizon")
+        variables = {}
+        for mid in sorted(scope):
+            snap = scope[mid]
+            if snap.get("horizon") not in (None, horizon):
+                raise CompileError(
+                    f"上游模型 {mid} 的 horizon={snap['horizon']} 与根模型 "
+                    f"日历 {horizon} 不一致"
+                )
+            for cell_id in sorted(snap["cells"]):
+                cell = snap["cells"][cell_id]
+                for day in range(1, horizon + 1):
+                    vname = daily_var(mid, cell_id, day)
+                    variables[vname] = {
+                        "model_id": mid,
+                        "cell_id": cell_id,
+                        "day": day,
+                        "kind": cell["kind"],
+                        "cell_hash": snap["cell_hashes"][cell_id],
+                        "daily": cell.get("daily"),
+                    }
+        return root_model, horizon, variables
+
+    @staticmethod
+    def _daily_input_value(cell, day):
+        """当日输入：daily 有该日则取该日外部入账，否则沿用快照的 value。"""
+        daily = cell.get("daily") or {}
+        key = str(day)
+        if key in daily:
+            return daily[key]
+        return cell["value"]
+
+    @staticmethod
+    def _seed_lookup(scope, root_model, mid, cell_id):
+        """第 0 日垫底值：根模型的 day0_seed 可覆盖任意作用域格。"""
+        key = f"{mid}::{cell_id}"
+        seed = scope[root_model].get("day0_seed") or {}
+        if key in seed:
+            return seed[key]
+        return None
+
+    @staticmethod
+    def _build_daily_equations(scope, root_model, horizon, variables):
+        """逐日组装方程。跨日项（lag=1）直接以第 0 日常数或前一日变量名代入，
+        绝不进入当日的自环/SCC。"""
+        equations = {}
+        adjacency = {}
+        temporal_edges = []
+        for mid in sorted(scope):
+            snap = scope[mid]
+            for cell_id in sorted(snap["cells"]):
+                cell = snap["cells"][cell_id]
+                for day in range(1, horizon + 1):
+                    vname = daily_var(mid, cell_id, day)
+                    coeffs = {vname: Fraction(1)}
+                    deps = []
+                    if cell["kind"] == "input":
+                        rhs = Fraction(Compiler._daily_input_value(cell, day))
+                    else:
+                        rhs = Fraction(cell["constant"])
+                    if cell["kind"] == "formula":
+                        for term in cell["terms"]:
+                            ref_model = term["model_id"]
+                            ref_cell = term["cell_id"]
+                            coef = Fraction(term["coef"])
+                            lag = term.get("lag", 0)
+                            if lag == 0:
+                                ref_var = daily_var(ref_model, ref_cell, day)
+                                if ref_var not in variables:
+                                    raise CompileError(
+                                        f"引用越出快照作用域：{vname} -> {ref_var}"
+                                    )
+                                coeffs[ref_var] = coeffs.get(ref_var, Fraction(0)) - coef
+                                deps.append(
+                                    {
+                                        "model_id": ref_model,
+                                        "cell_id": ref_cell,
+                                        "day": day,
+                                        "lag": 0,
+                                        "variable": ref_var,
+                                        "coef": term["coef"],
+                                    }
+                                )
+                            else:
+                                if day >= 2:
+                                    ref_var = daily_var(ref_model, ref_cell, day - 1)
+                                    coeffs[ref_var] = coeffs.get(ref_var, Fraction(0)) - coef
+                                    deps.append(
+                                        {
+                                            "model_id": ref_model,
+                                            "cell_id": ref_cell,
+                                            "day": day - 1,
+                                            "lag": 1,
+                                            "variable": ref_var,
+                                            "coef": term["coef"],
+                                        }
+                                    )
+                                    temporal_edges.append(
+                                        {"from": vname, "to": ref_var, "lag": 1}
+                                    )
+                                else:
+                                    # 第 1 日引用“前一日”= 第 0 日：必须是垫底常数。
+                                    seed = Compiler._seed_lookup(
+                                        scope, root_model, ref_model, ref_cell
+                                    )
+                                    if seed is None:
+                                        raise CompileError(
+                                            f"第 1 日的跨日引用缺少第 0 日垫底值："
+                                            f"{vname} 的 lag=1 项 -> "
+                                            f"{ref_model}::{ref_cell}"
+                                        )
+                                    # 方程 x - ... - coef·seed = constant，
+                                    # 把已知的垫底项移到右端即 + coef·seed。
+                                    rhs += coef * Fraction(seed)
+                                    deps.append(
+                                        {
+                                            "model_id": ref_model,
+                                            "cell_id": ref_cell,
+                                            "day": 0,
+                                            "lag": 1,
+                                            "seed_value": seed,
+                                            "coef": term["coef"],
+                                        }
+                                    )
+                    equations[vname] = {
+                        "lhs_variable": vname,
+                        "coeffs": {k: str(v) for k, v in sorted(coeffs.items())},
+                        "rhs": str(rhs),
+                        "cell_hash": snap["cell_hashes"][cell_id],
+                        "day": day,
+                    }
+                    adjacency[vname] = sorted(
+                        d["variable"] for d in deps if "variable" in d
+                    )
+                    variables[vname]["deps"] = deps
+        return equations, adjacency, temporal_edges
+
+    def compile_daily_snapshot(self, root_snap_id, label=None):
+        root_model, scope = self._resolve_scope(root_snap_id)
+        root_model, horizon, variables = self._build_daily_variables(
+            scope, root_model
+        )
+        equations, adjacency, temporal_edges = self._build_daily_equations(
+            scope, root_model, horizon, variables
+        )
+        sccs = tarjan_scc(variables.keys(), adjacency)
+        components = []
+        var_component = {}
+        for topo_index, members in enumerate(sccs):
+            comp_id = f"scc{topo_index}"
+            is_cyclic = len(members) > 1 or members[0] in adjacency.get(members[0], ())
+            for member in members:
+                var_component[member] = comp_id
+            components.append(
+                {
+                    "scc_id": comp_id,
+                    "topo_index": topo_index,
+                    "variables": members,
+                    "cyclic": is_cyclic,
+                }
+            )
+        root_snap = scope[root_model]
+        outputs = [
+            daily_var(root_model, cid, day)
+            for cid in root_snap["outputs"]
+            for day in range(1, horizon + 1)
+        ]
+        echoes = [
+            {
+                "variable": daily_var(root_model, cid, day),
+                "cell_id": cid,
+                "day": day,
+            }
+            for cid in root_snap["outputs"]
+            for day in range(1, horizon + 1)
+        ]
+        artifact = {
+            "artifact_kind": "compiled_daily_equations",
+            "schema_version": DAILY_SCHEMA_VERSION,
+            "label": label,
+            "root_model_id": root_model,
+            "root_snap_id": root_snap_id,
+            "horizon": horizon,
+            "modes": ["daily"],
+            "output_echoes": echoes,
+            "scope_snapshots": {
+                mid: {
+                    "snap_id": snap["snap_id"],
+                    "rev_id": snap["rev_id"],
+                    "name": snap["name"],
+                }
+                for mid, snap in sorted(scope.items())
+            },
+            "variables": {v: variables[v] for v in sorted(variables)},
+            "equations": {v: equations[v] for v in sorted(equations)},
+            "dependency_edges": [
+                {"from": v, "to": to}
+                for v in sorted(adjacency)
+                for to in adjacency[v]
+            ],
+            "temporal_edges": sorted(
+                temporal_edges, key=lambda e: (e["from"], e["to"])
+            ),
+            "components": components,
+            "var_component": var_component,
+            "root_outputs": outputs,
+            "model_outputs": {
+                mid: list(scope[mid].get("outputs") or []) for mid in sorted(scope)
+            },
+        }
+        artifact["artifact_hash"] = content_hash(
+            {k: v for k, v in artifact.items() if k != "artifact_hash"}
+        )
+        path = os.path.join(self.artifact_dir, f"{artifact['artifact_hash'][7:19]}.json")
+        write_json_atomic(path, artifact)
+        return artifact, path
+
     def compile_snapshot(self, root_snap_id, label=None):
         root_model, scope = self._resolve_scope(root_snap_id)
+        if scope[root_model].get("horizon") is not None:
+            return self.compile_daily_snapshot(root_snap_id, label=label)
         variables, equations, adjacency = self._build_equations(scope)
         sccs = tarjan_scc(variables.keys(), adjacency)
         # Tarjan 的出栈顺序即拓扑序：被依赖的 SCC 先出栈（在前），依赖者在后，
@@ -231,6 +478,9 @@ class Compiler:
     @staticmethod
     def load_artifact(path):
         artifact = read_json(path)
-        if artifact.get("artifact_kind") != "compiled_equations":
+        if artifact.get("artifact_kind") not in (
+            "compiled_equations",
+            "compiled_daily_equations",
+        ):
             raise CompileError(f"{path} 不是编译产物")
         return artifact

@@ -69,6 +69,48 @@ def build_parser():
     p = sub.add_parser("list-reports")
     p = sub.add_parser("get-report")
     p.add_argument("solve_id")
+
+    # ----------------------------------------------------- 分日回款 / 现金柜
+    p = sub.add_parser(
+        "daily-collections",
+        help="从分日报告提取各日唯一确定回款（可选定回款格）",
+    )
+    p.add_argument("solve_id")
+    p.add_argument("--source", default="root", help="模型 id，root 表示根模型")
+    p.add_argument("--cell", dest="cell_id", help="选定回款格 cell_id")
+
+    p = sub.add_parser(
+        "impact",
+        help="把某外部入账某日增加 delta，重解并报告各日回款变化",
+    )
+    p.add_argument("solve_id")
+    p.add_argument("input_model")
+    p.add_argument("input_cell")
+    p.add_argument("day", type=int)
+    p.add_argument("--delta", default="1")
+    p.add_argument("--output-model", dest="output_model")
+    p.add_argument("--output-cell", dest="output_cell")
+
+    p = sub.add_parser("put-cashier", help="发布现金柜请付日历与短存单报价")
+    p.add_argument("payload", help="现金柜 JSON 文件，- 表示 stdin")
+    p = sub.add_parser("list-cashiers")
+    p = sub.add_parser("get-cashier")
+    p.add_argument("cashier_id")
+    p.add_argument("--rev", dest="cashier_rev")
+
+    p = sub.add_parser(
+        "plan-cashier",
+        help="把分日报告的各日回款交给现金柜，出具并落盘投资安排",
+    )
+    p.add_argument("cashier_id")
+    p.add_argument("solve_id")
+    p.add_argument("--source", default="root")
+    p.add_argument("--cell", dest="cell_id")
+    p.add_argument("--rev", dest="cashier_rev")
+
+    p = sub.add_parser("get-ledger")
+    p.add_argument("ledger_id")
+    p = sub.add_parser("list-ledgers")
     return parser
 
 
@@ -126,10 +168,13 @@ def main(argv=None):
                 {
                     "artifact_path": path,
                     "artifact_hash": artifact["artifact_hash"],
+                    "artifact_kind": artifact["artifact_kind"],
                     "root_model_id": artifact["root_model_id"],
                     "scope_snapshots": artifact["scope_snapshots"],
+                    "horizon": artifact.get("horizon"),
                     "variable_count": len(artifact["variables"]),
                     "equation_count": len(artifact["equations"]),
+                    "temporal_edges": artifact.get("temporal_edges", []),
                     "components": [
                         {
                             "scc_id": c["scc_id"],
@@ -162,6 +207,46 @@ def main(argv=None):
             _emit(service.list_reports())
         elif cmd == "get-report":
             _emit(service.get_report(args.solve_id))
+        elif cmd == "daily-collections":
+            report = service.get_report(args.solve_id)
+            _emit(
+                service.daily_collections(
+                    report, source=args.source, cell_id=args.cell_id
+                )
+            )
+        elif cmd == "impact":
+            report = service.get_report(args.solve_id)
+            _emit(
+                service.impact(
+                    report,
+                    args.input_model,
+                    args.input_cell,
+                    args.day,
+                    args.delta,
+                    output_model=args.output_model,
+                    output_cell=args.output_cell,
+                )
+            )
+        elif cmd == "put-cashier":
+            _emit(service.put_cashier(_read_payload(args)))
+        elif cmd == "list-cashiers":
+            _emit(service.list_cashiers())
+        elif cmd == "get-cashier":
+            _emit(service.get_cashier(args.cashier_id, rev_id=args.cashier_rev))
+        elif cmd == "plan-cashier":
+            _emit(
+                service.execute_cashier(
+                    args.cashier_id,
+                    args.solve_id,
+                    source=args.source,
+                    cashier_rev=args.cashier_rev,
+                    cell_id=args.cell_id,
+                )
+            )
+        elif cmd == "get-ledger":
+            _emit(service.get_ledger(args.ledger_id))
+        elif cmd == "list-ledgers":
+            _emit(service.list_ledgers())
         else:  # pragma: no cover
             raise SystemExit(2)
     except BudgetError as exc:
@@ -175,16 +260,24 @@ def main(argv=None):
 
 
 def _report_summary(report):
-    return {
+    summary = {
         "solve_id": report["solve_id"],
         "report_hash": report["report_hash"],
         "artifact_hash": report["artifact_hash"],
+        "artifact_kind": report.get("artifact_kind"),
         "catalog_snapshot": report["catalog_snapshot"],
         "solve_config": report["solve_config"],
         "cache": report["cache"],
         "outputs": report["outputs"],
         "sections": report["sections"],
     }
+    if report.get("horizon") is not None:
+        summary["horizon"] = report["horizon"]
+        summary["daily_products"] = report["daily_products"]
+        summary["daily_dependency_issues"] = report.get(
+            "daily_dependency_issues", {}
+        )
+    return summary
 
 
 if __name__ == "__main__":

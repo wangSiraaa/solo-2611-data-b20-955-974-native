@@ -11,9 +11,11 @@
 ```bash
 ./run_tests.sh
 # 或分步
-python3 -m tests.test_service   # 48 项断言：手算小例 + 六类规定场景 + 重开
+python3 -m tests.test_service   # 51 项断言：手算小例 + 六类规定场景 + 重开
+python3 -m tests.test_daily     # 48 项断言：分日回款 + 现金柜 + 三种情形 + 补款旧账
 python3 -m tests.test_scale     # 20 模型 / 300 格 / 1000 引用规模与计时
 python3 -m tests.demo_cli       # CLI 子进程端到端
+python3 -m tests.demo_daily     # 分日回款 / 现金柜现场演示
 ```
 
 ## 架构与数据流
@@ -41,11 +43,12 @@ JSON 模型 ──put-model──▶ 目录 Catalog（修订/快照，文件持�
 | --- | --- |
 | `budget_solver/rationals.py` | 精确有理数边界：拒绝 float、分子分母 ≤12 位、规范分数串 |
 | `budget_solver/catalog.py` | 模型目录：创建/修订/固定快照；永久 id 与改名分离；整次修订原子拒绝 |
-| `budget_solver/compiler.py` | 快照作用域展开、方程规范化（含自环系数 `1-k`）、依赖图、迭代 Tarjan SCC |
-| `budget_solver/solver.py` | SCC 分块精确 RREF、跨块自由变量传播、矛盾证书、内容缓存、报告发布 |
-| `budget_solver/verifier.py` | 独立验证路径：重建事实、独立分块求解、代回/证书/哈希核对 |
-| `budget_solver/service.py` | 可重开门面：目录面/编译面/解算面/验证面 |
-| `budget_solver/cli.py` | `put-model` `snapshot` `compile` `solve` `query` `explain` `verify-*` |
+| `budget_solver/compiler.py` | 快照作用域展开、方程规范化（含自环系数 `1-k`）、依赖图、迭代 Tarjan SCC；声明 `horizon` 时按日展开、跨日滞后单列 |
+| `budget_solver/solver.py` | SCC 分块精确 RREF、跨块自由变量传播、矛盾证书、内容缓存、报告发布；分日报告附逐日产品与问题来源 |
+| `budget_solver/verifier.py` | 独立验证路径：重建事实、独立分块求解、代回/证书/哈希核对；分日产物独立重放滞后与派生的外部入账扰动 |
+| `budget_solver/cashier.py` | 现金柜：请付日历 + 短存单报价的精确投资排程（整数放大穷举）、配置与账本持久化 |
+| `budget_solver/service.py` | 可重开门面：目录面/编译面/解算面/验证面 + 分日回款/现金柜面 |
+| `budget_solver/cli.py` | `put-model` `snapshot` `compile` `solve` `query` `explain` `verify-*` `daily-collections` `impact` `put-cashier` `plan-cashier` `get-ledger` |
 
 ## 关键设计决策
 
@@ -125,6 +128,13 @@ python3 -m budget_solver.cli --data-root ./data query solve1 'M_ID::cell'
 python3 -m budget_solver.cli --data-root ./data explain solve1 'M_ID::cell'
 python3 -m budget_solver.cli --data-root ./data verify-compile <artifact>
 python3 -m budget_solver.cli --data-root ./data verify-solve solve1
+
+# 分日回款 + 现金柜
+python3 -m budget_solver.cli --data-root ./data daily-collections solve1 --cell x
+python3 -m budget_solver.cli --data-root ./data impact solve1 M_COLLECT in 1 --delta 1
+python3 -m budget_solver.cli --data-root ./data put-cashier cashier.json
+python3 -m budget_solver.cli --data-root ./data plan-cashier CASH_MAIN solve1
+python3 -m budget_solver.cli --data-root ./data get-ledger ledger1
 ```
 
 模型 JSON 示例：
@@ -147,14 +157,75 @@ python3 -m budget_solver.cli --data-root ./data verify-solve solve1
 跨模型 term 增加 `"model_id": "OTHER_ID"`。项形状本身（单个有理系数 × 单个格
 引用）从结构上排除了“两个未知格相乘”。
 
+## 分日回款产品（隔日按比例入账）
+
+在原有快照/编译/解算路径上增加“按日展开”，不新建第二套账务系统：
+
+* 顶层 `horizon` 声明日历天数（最多 20）；快照因此变为逐日快照。
+* 输入格可带 `"daily": {"1": "8", "2": "0", ...}` 表示该日外部入账；未列出的日
+  沿用快照的 `value`。
+* term 可带 `"lag": 1`：引用“前一天”的同名格；未带（或 `0`）仍是当天。
+  旧式快照（无 `horizon`/`lag`/`daily`）行为完全不变。
+* `day0_seed` 给出第 1 日所需的前日垫底值（键可为 `CELL` 或 `MODEL_ID::CELL`），
+  实际计算日从 1 起；第 1 日若引用前日而缺垫底值，编译直接报错并指出来源。
+* **当天的环与隔日项分离**：`lag=1` 项被编译成指向“前一天变量名”的边并登记在
+  `temporal_edges`，绝不并入当天 SCC；同一天的循环仍在当天联立求解。
+
+```json
+{
+  "model_id": "M_COLLECT",
+  "name": "分日回款",
+  "horizon": 3,
+  "day0_seed": {"x": "0"},
+  "cells": {
+    "in": {"kind": "input", "value": "0",
+           "daily": {"1": "8", "2": "0", "3": "0"}},
+    "x":  {"kind": "formula", "constant": "0",
+           "terms": [{"coef": "1", "cell_id": "in"},
+                     {"coef": "1/2", "cell_id": "x", "lag": 1}]}
+  },
+  "outputs": ["x"]
+}
+```
+
+`daily-collections` 只把各日**唯一确定**的输出签为回款定数；参数化格给表达式与
+自由参数名，矛盾格给 λ 证书与来源方程。`impact` 把指定外部入账某日 `+1`，
+只改派生产物的右端（带 `perturbation` 标记与缓存盐），返回逐日变化；原快照与
+原报告不动。不相关表的矛盾/自由只记入来源，不阻断选定回款格。补录早期入账后
+重出一版，旧报告、旧账本与旧快照原样保留、可重开复读。
+
+## 现金柜（请付日历 + 短存单）
+
+`put-cashier` 接收 `horizon`、`opening_cash`、`mandatory`（每日必付）与至多 16
+张 `deposits`（`issue_day` / `maturity_day` / `principal` / `payout`）。`plan-cashier`
+把解算报告的逐日确定回款交给现金柜：
+
+* 每日顺序：先收当日回款 + 当日到期存单本息，再付必付款，余额非负才可继续；
+  随后用剩余现金购买当日发行的任意几张存单。
+* 每张只能整张购买一次、不可中途变现；不允许向未来借钱。
+* 目标为最大化最终实现收益总和；最多 16 张 → 穷举 2^16 个购买组合，内部用
+  各金额分母的 LCM 放大成整数精确比较，选定后用 `Fraction` 重建逐日账本。
+* 输出选中单号、逐日收支、最低日末余额；若所有组合都付不清，给出从哪一天起
+  再也没有可行资金安排。相同回款日历可交给不同现金柜，账本分别落盘。
+
+三种规定情形（`tests/test_daily.py` 与 `tests/demo_daily.py` 可复跑）：
+
+| 情形 | 回款 | 选中 | 收益 |
+| --- | --- | --- | --- |
+| 基准 | 8 / 4 / 2 | 仅 B | 1 |
+| 滞后系数改 1 | 8 / 8 / 8 | A | 2 |
+| 基准回款、B 兑付额改 9 | 8 / 4 / 2 | 仅 B | 4 |
+
 ## 持久化布局
 
 ```
 <data-root>/
   catalog/catalog.json              # 序列与 HEAD 指针；models/<id>/revs|snaps
-  artifacts/<hash12>.json           # 不可变编译产物
+  artifacts/<hash12>.json           # 不可变编译产物（含分日产物）
   reports/solveN.json + seq.json    # 不可变解算报告
   cache/index.json + closure-*.json # 内容寻址闭包缓存（可重开）
+  cashiers/index.json + configs/<id>/<rev>.json  # 现金柜请付日历与报价（版本化）
+  ledgers/ledgerN.json + seq.json   # 不可变投资安排账本（可重开复读）
 ```
 
 所有 JSON 经临时文件 + `os.replace` 原子写入。

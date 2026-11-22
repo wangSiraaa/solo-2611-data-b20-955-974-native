@@ -192,3 +192,66 @@ def bad_model_good_neighbor(model_id="M_BAD"):
         },
         "outputs": ["h"],
     }
+
+
+# ============================================================ 分日回款产品
+def daily_collection_model(model_id="M_COLLECT", late_ratio="1/2"):
+    """分日回款：x_d = 当日外部入账 + late_ratio · x_{d-1}，x_0 = 0。
+
+    外部入账：日 1 = 8，日 2、3 = 0。
+    * late_ratio = 1/2 → 回款 8、4、2（基准）；
+    * late_ratio = 1   → 回款 8、8、8（改滞后系数的对照）。
+    第 0 日 x = 0 由 day0_seed 提供，实际计算日从 1 起。
+    """
+    return {
+        "model_id": model_id,
+        "name": "分日回款（隔日按比例入账）",
+        "horizon": 3,
+        "day0_seed": {"x": "0"},
+        "cells": {
+            "in": {
+                "kind": "input",
+                "value": "0",
+                "daily": {"1": "8", "2": "0", "3": "0"},
+            },
+            "x": {
+                "kind": "formula",
+                "constant": "0",
+                "terms": [
+                    {"coef": "1", "cell_id": "in"},
+                    {"coef": late_ratio, "cell_id": "x", "lag": 1},
+                ],
+            },
+        },
+        "outputs": ["x"],
+    }
+
+
+def cashier_two_deposits(cashier_id="CASH_MAIN", b_payout="6"):
+    """现金柜：期初 0，仅日 2 必付 6；日 1 发行 A（8→日3收10）与 B（5→日2收6）。
+
+    B 的兑付额可调（题目第三问改成 9）。日历 3 天。
+    """
+    return {
+        "cashier_id": cashier_id,
+        "name": "现金柜（两张短存单）",
+        "horizon": 3,
+        "opening_cash": "0",
+        "mandatory": {"2": "6"},
+        "deposits": [
+            {
+                "id": "A",
+                "issue_day": 1,
+                "maturity_day": 3,
+                "principal": "8",
+                "payout": "10",
+            },
+            {
+                "id": "B",
+                "issue_day": 1,
+                "maturity_day": 2,
+                "principal": "5",
+                "payout": b_payout,
+            },
+        ],
+    }
