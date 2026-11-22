@@ -15,18 +15,25 @@
 | `group_consol/ledger.py` | 独立实体账簿：原子入账、连续 seq、稳定身份复读、局部校验、前缀查询 |
 | `group_consol/consolidation.py` | 合并服务：切面冻结、错时待核、逐发票三类抵销、不可变底稿 |
 | `group_consol/verifier.py` | 独立核验：直读 SQLite 原始表重算，不调用被核验系统的汇总函数 |
+| `group_consol/clearing.py` | 银行清算包事实：唯一归包、双边凭证/最终 heads 核对、收付台三态查询、独立账重排 |
+| `group_consol/binding.py` | 日结装册：分日红线枚举、跨日调节表生命周期、两套择优与配额卡点诊断 |
+| `group_consol/archive.py` | 档案室：只对选中版本开表/转记/销表，表号不复用，封册可重开、凭证可追溯 |
 | `plans/operations.json` | 68 步 JSON 操作计划（全部要求场景的端到端演示） |
 | `scripts/run_plan.py` | 计划执行器，逐条断言 |
 | `scripts/run_case.py` | 随题 `case.json` 的原样复现（含两种结算口径对比） |
+| `scripts/run_clearing_demo.py` | 清算包/调节表/装册端到端演示（三种装册、跨日一表、等额未齐、配额卡点） |
 | `tests/test_ledger_and_merge.py` | 单元测试（负利润、有理分数、回滚、不可变性等） |
+| `tests/test_clearing_binding.py` | 清算装册单元测试（跨票/重复/缺侧/未平、表生命周期、择优、重开追溯） |
 | `tests/stress_test.py` | 40 发票 / 每实体 200 凭证 / 20 声明的容量测试 |
 
 运行：
 
 ```bash
 python3.11 -m unittest tests.test_ledger_and_merge -v
+python3.11 -m unittest tests.test_clearing_binding -v
 python3.11 scripts/run_plan.py plans/operations.json
 python3.11 scripts/run_case.py
+python3.11 scripts/run_clearing_demo.py
 python3.11 tests/stress_test.py
 ```
 
@@ -114,3 +121,36 @@ r=0 也不能省略，且 0≤r≤q）。待核结论同样落盘并可复读。
   成本低且一致性由 append-only 约束兜底。
 - 错时提交：源端无阻塞地接受单边凭证，冲突全部推迟到发布时一次性输出待核清单；
   重复发布同切面是 O(1) 的持久化复读，不重算；异文切面直接拒绝，不产生第二份底稿。
+
+## 6. 银行清算包与日结装册（clearing / binding / archive）
+
+### 清算事实（clearing.py，纯内存、不改单体账）
+- 每个清算包号只属一张双边内部发票（prefix）；一包可分多笔记，但每笔凭证
+  `(实体, 凭证号)` 必须唯一归包。跨票（前缀与包专属发票不符）、凭证/序号重复、
+  未知包一律结构化拒绝（`cross_invoice / duplicate_voucher / unknown_package`）。
+- 可签事实要求两侧都有凭证且各自合计等于该包最终 head；缺侧 `missing_side`、
+  未平 `not_balanced`。同额不同包不得交叉凑平。
+- `desk_query(prefix)` 回答收付台三态：全未进 / 双边全收 / 已开头未收齐，并给两侧
+  已入原单、已入金额与未进金额；两侧累计相等不代表同一批包。
+- `resubmit_order` 从同一已核清算生成独立账：只换某实体提交顺序、重排相对 seq，
+  凭证身份/金额/归包不变，原账保持可复读。
+
+### 装册排法与调节表（binding.py）
+- 每日给 P、S 末序红线，逐日分别不减，末日固定在最终 heads，每日可一侧无新凭证；
+  红线越界或回落直接拒绝。
+- 包在某日末未双边全收（按该包专属原单全集判定，非金额凑平）即被日界截住：
+  首次跨界开包专属表，其后未齐之日滚入，双边全收当日注销；同包跨多天只耗一张，
+  不换号、不接别的包。两侧当日累计等额但原单未齐仍开表（差额 0，占表不占额度）。
+- 每日随表登记本包差额＝两侧“截至当日累计已进金额”之差绝对值；全日未清表差额和
+  的峰值即须申请的日差额额度，跨包不抵消。
+- 问一 `best_under_quotas`：表配额与日差额额度内最小总移动，同值先省表数；
+  问二 `minimum_quota_for_movement`：移动预算内最低日差额额度，同额度先省表。
+  `diagnose` 在其余约束仍生效的前提下分项定位 `*_quota_short / move_budget_short`。
+
+### 档案室（archive.py，只对选中版本占号）
+- 测算排法只产生 `TableLife`，不分配表号；`ArchiveRegistry.bind` 才对选定 Plan
+  按 (开表日, 包号) 从配额池编号（R001…），开表/滚入/注销落不可变台账。
+- 注销表号在本档案内不复用；不同档案各自独立号簿、互不串号；同档案号异文 `conflict`。
+- 每日封 P/S 两册只引用原凭证号与末序，单体凭证与历史册可复读；`reopen` 复读全部
+  封册与表台账，`trace_voucher` 沿原凭证号反查首次入册日与经过的开表/转记/销表手续。
+- 容量约束：至多 8 日、6 清算包、每侧至多 18 笔后续凭证，超限构造即拒。
