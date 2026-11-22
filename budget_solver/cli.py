@@ -69,6 +69,55 @@ def build_parser():
     p = sub.add_parser("list-reports")
     p = sub.add_parser("get-report")
     p.add_argument("solve_id")
+
+    # ------------------------------------------------------- 票面发行/校版
+    p = sub.add_parser("issue-ticket", help="从编译产物发行票面仿射校验关系")
+    p.add_argument("artifact", help="编译产物路径或内容哈希")
+    p.add_argument("ticket_id")
+    p.add_argument("--face", action="append", required=True,
+                   help="票面永久格变量（model::cell），可重复，至多 6 个")
+    p.add_argument("--label")
+
+    p = sub.add_parser("list-tickets")
+    p = sub.add_parser("get-ticket")
+    p.add_argument("ticket_id")
+
+    p = sub.add_parser("check-face", help="联合核查一组票面值并拿内页补写/冲突依据")
+    p.add_argument("ticket_id")
+    p.add_argument("payload", help="JSON：{票面变量: 有理值}，- 表示 stdin")
+
+    p = sub.add_parser("verify-ticket")
+    p.add_argument("ticket_id")
+
+    # ------------------------------------------------------- 收单/询证/订单
+    p = sub.add_parser("analyze-paper", help="纸票容错辨错与合计固定性判断")
+    p.add_argument("ticket_id")
+    p.add_argument("payload", help="JSON：{paper, total_form, k}，- 表示 stdin")
+
+    p = sub.add_parser("plan-inquiries", help="在经费/分馆上限内规划询证套餐")
+    p.add_argument("ticket_id")
+    p.add_argument("payload",
+                   help="JSON：{paper, total_form, k, catalog, budget, max_branches}")
+
+    p = sub.add_parser("open-order")
+    p.add_argument("ticket_id")
+    p.add_argument("payload",
+                   help="JSON：{paper, total_form, k, catalog, budget, max_branches}")
+
+    p = sub.add_parser("dispatch-inquiries", help="一次确定套餐并发单（只计费一次）")
+    p.add_argument("order_id")
+    p.add_argument("payload", help="JSON：{item_ids: [...]}，- 表示 stdin")
+
+    p = sub.add_parser("receive-reply", help="收回签（票号/发行版/问项号三重核对）")
+    p.add_argument("order_id")
+    p.add_argument("payload",
+                   help="JSON：{ticket_id, issue_hash, item_id, value}，- 表示 stdin")
+
+    p = sub.add_parser("list-orders")
+    p = sub.add_parser("get-order")
+    p.add_argument("order_id")
+    p = sub.add_parser("verify-booking")
+    p.add_argument("order_id")
     return parser
 
 
@@ -162,6 +211,46 @@ def main(argv=None):
             _emit(service.list_reports())
         elif cmd == "get-report":
             _emit(service.get_report(args.solve_id))
+        elif cmd == "issue-ticket":
+            artifact = service.load_artifact(args.artifact)
+            _emit(service.issue_ticket(
+                artifact, args.face, args.ticket_id, label=args.label))
+        elif cmd == "list-tickets":
+            _emit(service.list_tickets())
+        elif cmd == "get-ticket":
+            _emit(service.get_ticket(args.ticket_id))
+        elif cmd == "check-face":
+            _emit(service.check_face(args.ticket_id, _read_payload(args)))
+        elif cmd == "verify-ticket":
+            _emit(service.verify_ticket(args.ticket_id))
+        elif cmd == "analyze-paper":
+            body = _read_payload(args)
+            _emit(service.analyze_paper(
+                args.ticket_id, body["paper"], body["total_form"], body["k"]))
+        elif cmd == "plan-inquiries":
+            body = _read_payload(args)
+            _emit(service.plan_inquiries(
+                args.ticket_id, body["paper"], body["total_form"], body["k"],
+                body["catalog"], body["budget"], body["max_branches"]))
+        elif cmd == "open-order":
+            body = _read_payload(args)
+            _emit(service.open_order(
+                args.ticket_id, body["paper"], body["total_form"], body["k"],
+                body["catalog"], body["budget"], body["max_branches"]))
+        elif cmd == "dispatch-inquiries":
+            body = _read_payload(args)
+            _emit(service.dispatch_inquiries(args.order_id, body["item_ids"]))
+        elif cmd == "receive-reply":
+            body = _read_payload(args)
+            _emit(service.receive_reply(
+                args.order_id, body["ticket_id"], body["issue_hash"],
+                body["item_id"], body["value"]))
+        elif cmd == "list-orders":
+            _emit(service.list_orders())
+        elif cmd == "get-order":
+            _emit(service.get_order(args.order_id))
+        elif cmd == "verify-booking":
+            _emit(service.verify_booking(args.order_id))
         else:  # pragma: no cover
             raise SystemExit(2)
     except BudgetError as exc:

@@ -11,9 +11,11 @@
 ```bash
 ./run_tests.sh
 # 或分步
-python3 -m tests.test_service   # 48 项断言：手算小例 + 六类规定场景 + 重开
-python3 -m tests.test_scale     # 20 模型 / 300 格 / 1000 引用规模与计时
-python3 -m tests.demo_cli       # CLI 子进程端到端
+python3 -m tests.test_service     # 51 项断言：手算小例 + 六类规定场景 + 重开
+python3 -m tests.test_tickets     # 74 项断言：票面发行/校版/辨错/询证/回签状态机
+python3 -m tests.test_scale       # 20 模型 / 300 格 / 1000 引用规模与计时
+python3 -m tests.demo_cli         # 原 CLI 子进程端到端
+python3 -m tests.demo_ticket_cli  # 票版/询证/带原单号回签的 CLI 端到端
 ```
 
 ## 架构与数据流
@@ -46,6 +48,12 @@ JSON 模型 ──put-model──▶ 目录 Catalog（修订/快照，文件持�
 | `budget_solver/verifier.py` | 独立验证路径：重建事实、独立分块求解、代回/证书/哈希核对 |
 | `budget_solver/service.py` | 可重开门面：目录面/编译面/解算面/验证面 |
 | `budget_solver/cli.py` | `put-model` `snapshot` `compile` `solve` `query` `explain` `verify-*` |
+| `budget_solver/linspace.py` | 通用有理数仿射代数：带行溯源 Gauss-Jordan、仿射参数解、零空间/行空间判定 |
+| `budget_solver/tickets.py` | 印务处：至多六个永久格发行票面仿射等式、校版员联合核查与内页补写 |
+| `budget_solver/recovery.py` | 收单员：k≤2 容错复原枚举、唯一/必错/可能错辨错、合计固定性判断 |
+| `budget_solver/inquiry.py` | 询证目录（至多四项）与套餐判别：同答不同款反例、经费/分馆两限规划 |
+| `budget_solver/orders.py` | 收发处：询证订单状态机、回签三重核对、幂等收费、联合相容签账 |
+| `budget_solver/ticket_verify.py` | 票版与签账回执的独立验证（独立重建消元，不信任发行产物） |
 
 ## 关键设计决策
 
@@ -101,6 +109,87 @@ JSON 模型 ──put-model──▶ 目录 Catalog（修订/快照，文件持�
 * 确定值：赋入闭包内全部原方程，残差必须全为 0；
 * 参数表达式：6 组参数实例化符号代回，目标方程恒等成立；
 * 矛盾证书：按报告 λ 重算原方程组合，左端恒零、右端非零且与证书一致。
+
+## 票面发行、容错辨错与询证签账
+
+在不改动原模型、单输出 `query`、`explain` 的前提下，系统在编译产物之上再叠一层
+“印务—收单—收发”业务。所有运算仍在有理数上，票版、订单、回执均内容寻址、落盘、
+可重开。
+
+### 6. 印务处发行票版（`tickets.py`）
+
+从**指定冻结快照的编译产物**选至多六个永久格作为票面格：
+
+1. 合并各票面格在实际钉选作用域中的方程依赖闭包，闭包内其余格为内页格；
+2. 先整体求解闭包——联合闭包矛盾则**拒绝发版**，回原方程的整数 λ 组合证书；
+3. 带行溯源消去内页格，只剩票面仿射等式 `Σ aᵢ·xᵢ = b`，内页枢轴行随票版保存；
+4. 两条对偶性质由独立验证器（`ticket_verify.py`）复核：
+   * 健全性：任一合法内页填写投影到票面后必然满足全部票面等式（发行行落在独立
+     重建的投影行空间内，右端经 λ 组合重算一致）；
+   * 完备性：发行等式的投影行空间与独立消元得到的行空间**秩相等**，因此任何通过
+     票面的票面值都能补成同一闭包的完整解（自由内页/票面取 0 即基点）。
+
+校版员 `check-face` 一次**联合**核查一组票面值：单栏各自未定时只允许共享同一组
+联合自由参数，不能各挑各的；相容返回票面参数解与内页补写，矛盾返回票面等式/
+观测栏的 λ 组合与非零残差。
+
+### 7. 收单员容错辨错（`recovery.py`）
+
+纸票给实际非空栏（空栏不算错）、容错 `k`（k≤2）与一个票面线性合计。系统枚举
+至多 k 栏的误抄位置，把未误抄栏等于纸值作为观测方程与票面等式联合求解，按
+基点/零空间规范化去重，得到全部相容复原子空间，并输出：
+
+* `unique_faces`——在全部复原中都固定的栏（含空栏）；
+* `must_error_filled` / `possibly_error_filled`——必错（每个复原都偏离纸值）与
+  可能错的已填栏；
+* 每个误抄集合下的具体复原（基点 + 自由方向 + 该子空间内合计）；
+* 容错内无任何复原 → `rejected`，整票退回、不发询证；
+* 合计在全部复原中固定 → `fixed` 并直接给 `booked_total`；否则 `ambiguous`。
+
+### 8. 询证套餐与回签状态机（`inquiry.py` / `orders.py`）
+
+本月询证目录至多四项，每项有名称、承办分馆、收费和一条票面线性算式。套餐判别
+在有理数上做**耦合仿射系统**：取两个子空间拷贝 x、x′（同一子空间也取两份独立
+自由参数），令套餐每项回答相等；若系统相容且合计差不恒为零，就产出“答数相同、
+合计不同”的两张有效票反例，套餐不充分。规划在 `budget` 与 `max_branches` 两限内
+枚举全部非空套餐，按少馆→少费排序；无可用套餐时阻塞并附反例。
+
+订单（`orders.py`）绑定一张真正的票（票号 + 发行版哈希）：
+
+* 问项在看答案以前一次 `dispatch` 确定，同一馆一批递送、按项分别计费，**只在
+  首次发出时收费一次**；重复发单直接拒绝；
+* 回签必须带票号、发行版、问项号并与实际发出的同项匹配——票号/发行版不符即便
+  答数碰巧相容也拒收；同项重复回答幂等（不重复收费/入账），同项冲突回答置
+  `contradicted`；
+* 回答到齐后与每个 k 内容错复原做子空间求交：联合相容且合计唯一才 `booked`，
+  给可核对的完整复原（票面残差全 0、误抄栏数、回签核对清单、回执哈希）；联合
+  矛盾附 λ/子空间依据且不入账；只回部分则保留 `awaiting_replies`。
+
+### 9. 持久化布局（新增）
+
+```
+<data-root>/
+  tickets/<ticket_id>.json     # 票版：票面等式、内页枢轴、闭包原方程、issue_hash
+  orders/ordN.json + seq.json  # 询证订单：套餐、回签、事件流、签账回执/矛盾依据
+```
+
+### 10. 新增 CLI 入口
+
+```bash
+python3 -m budget_solver.cli --data-root ./data issue-ticket <artifact> TK1 \
+    --face M::A --face M::B --face M::C --label 三栏票版
+python3 -m budget_solver.cli --data-root ./data verify-ticket TK1
+python3 -m budget_solver.cli --data-root ./data check-face TK1 face.json
+python3 -m budget_solver.cli --data-root ./data analyze-paper TK1 paper.json
+python3 -m budget_solver.cli --data-root ./data plan-inquiries TK1 plan.json
+python3 -m budget_solver.cli --data-root ./data open-order TK1 plan.json
+python3 -m budget_solver.cli --data-root ./data dispatch-inquiries ord1 items.json
+python3 -m budget_solver.cli --data-root ./data receive-reply ord1 reply.json
+python3 -m budget_solver.cli --data-root ./data verify-booking ord1
+```
+
+`paper.json` 形如 `{"paper": {"M::A": "4"}, "total_form": {"terms": {"M::C": "1"}}, "k": 1}`；
+`reply.json` 形如 `{"ticket_id": "TK1", "issue_hash": "sha256:...", "item_id": "Q1", "value": "21"}`。
 
 ## 手算案例（tests/scenarios.py，全部有独立断言）
 

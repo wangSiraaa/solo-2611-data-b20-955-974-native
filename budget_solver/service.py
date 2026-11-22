@@ -11,7 +11,13 @@ import os
 from .catalog import Catalog
 from .compiler import Compiler
 from .errors import NotFoundError
+from .inquiry import InquiryCatalog, recommend as recommend_plans
+from .orders import OrderDesk
+from .recovery import analyze_paper, feasible_recoveries
 from .solver import SolverService
+from .tickets import TicketOffice
+from .ticket_verify import verify_booking as _verify_booking
+from .ticket_verify import verify_ticket as _verify_ticket
 from .verifier import verify_compile as _verify_compile
 from .verifier import verify_solve as _verify_solve
 
@@ -23,10 +29,16 @@ class BudgetService:
         self.artifact_dir = os.path.join(self.data_root, "artifacts")
         self.report_dir = os.path.join(self.data_root, "reports")
         self.cache_dir = os.path.join(self.data_root, "cache")
+        self.ticket_dir = os.path.join(self.data_root, "tickets")
+        self.order_dir = os.path.join(self.data_root, "orders")
         self.compiler = Compiler(self.catalog, self.artifact_dir)
         self.solver = SolverService(
             self.catalog, self.artifact_dir, self.report_dir, self.cache_dir
         )
+        self.ticket_office = TicketOffice(
+            self.catalog, self.artifact_dir, self.ticket_dir
+        )
+        self.order_desk = OrderDesk(self.order_dir, self.ticket_office.get_ticket)
 
     # ------------------------------------------------------------- 目录面
     def put_model(self, payload):
@@ -97,3 +109,96 @@ class BudgetService:
         report = self.get_report(solve_id)
         artifact = self.load_artifact(report["artifact_hash"])
         return _verify_solve(self.catalog, artifact, report)
+
+    # ------------------------------------------------------------- 票版面
+    def issue_ticket(self, artifact_or_hash, face_vars, ticket_id, label=None):
+        """从指定冻结快照的编译产物发行票面校验关系。"""
+        artifact = self._as_artifact(artifact_or_hash)
+        return self.ticket_office.issue(artifact, face_vars, ticket_id, label=label)
+
+    def get_ticket(self, ticket_id):
+        return self.ticket_office.get_ticket(ticket_id)
+
+    def list_tickets(self):
+        return self.ticket_office.list_tickets()
+
+    def check_face(self, ticket_id, assignment):
+        """校版员独立核查一组票面值，拿内页补写或冲突依据。"""
+        return self.ticket_office.check_face(ticket_id, assignment)
+
+    def verify_ticket(self, ticket_id):
+        ticket = self.ticket_office.get_ticket(ticket_id)
+        artifact = self.load_artifact(ticket["artifact_hash"])
+        return _verify_ticket(artifact, ticket)
+
+    # ------------------------------------------------------------- 收单面
+    def analyze_paper(self, ticket_id, paper, total_form, k):
+        """纸票辨错：唯一栏/必错栏/可能错栏/相容复原/合计是否固定。"""
+        ticket = self.ticket_office.get_ticket(ticket_id)
+        return analyze_paper(ticket, paper, total_form, k)
+
+    def plan_inquiries(self, ticket_id, paper, total_form, k,
+                       catalog_items, budget, max_branches):
+        """辨错 + 询证套餐规划：合计已固定则直接提示记账，否则给两限内套餐。"""
+        ticket = self.ticket_office.get_ticket(ticket_id)
+        analysis = analyze_paper(ticket, paper, total_form, k)
+        if analysis["status"] != "ambiguous":
+            return {"analysis": analysis, "planning": None}
+        catalog = InquiryCatalog(ticket, catalog_items)
+        recoveries = feasible_recoveries(ticket, _as_fractions(paper), k)
+        planning = recommend_plans(
+            catalog, recoveries, _parse_total_form(total_form),
+            budget, max_branches,
+        )
+        return {"analysis": analysis, "planning": planning}
+
+    # ------------------------------------------------------------- 订单面
+    def open_order(self, ticket_id, paper, total_form, k,
+                   catalog_items, budget, max_branches):
+        ticket = self.ticket_office.get_ticket(ticket_id)
+        analysis = analyze_paper(ticket, paper, total_form, k)
+        return self.order_desk.open_order(
+            ticket, paper, total_form, k, analysis,
+            catalog_items, budget, max_branches,
+        )
+
+    def dispatch_inquiries(self, order_id, item_ids):
+        return self.order_desk.dispatch(order_id, item_ids)
+
+    def receive_reply(self, order_id, ticket_id, issue_hash, item_id, value):
+        return self.order_desk.receive_reply(
+            order_id, ticket_id, issue_hash, item_id, value)
+
+    def get_order(self, order_id):
+        return self.order_desk.get_order(order_id)
+
+    def list_orders(self):
+        return self.order_desk.list_orders()
+
+    def verify_booking(self, order_id):
+        order = self.order_desk.get_order(order_id)
+        ticket = self.ticket_office.get_ticket(order["ticket_id"])
+        artifact = self.load_artifact(ticket["artifact_hash"])
+        return _verify_booking(artifact, ticket, order)
+
+    # ------------------------------------------------------------- 内部辅助
+    def _as_artifact(self, artifact_or_hash):
+        if isinstance(artifact_or_hash, dict):
+            return artifact_or_hash
+        return self.load_artifact(artifact_or_hash)
+
+
+def _as_fractions(paper):
+    from fractions import Fraction
+
+    return {v: (f if isinstance(f, Fraction) else Fraction(f))
+            for v, f in (paper or {}).items()}
+
+
+def _parse_total_form(total_form):
+    from fractions import Fraction
+
+    return {
+        "constant": Fraction(total_form.get("constant", 0)),
+        "terms": {v: Fraction(c) for v, c in total_form.get("terms", {}).items()},
+    }
